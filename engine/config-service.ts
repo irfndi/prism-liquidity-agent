@@ -902,7 +902,7 @@ export interface AppConfig {
 export class ConfigService extends Context.Service<ConfigService, AppConfig>()("ConfigService") {}
 
 function validatedNumber(name: string, min: number, fallback: number, max?: number) {
-  return Config.number(name).pipe(
+  return Config.Number(name).pipe(
     Effect.map((n) => {
       if (!Number.isFinite(n)) {
         logger.warn("Invalid numeric configuration; using fallback", { name, value: n, fallback });
@@ -1109,7 +1109,7 @@ function resolveFeeDensityBand(highRaw: number, lowRaw: number): FeeDensityBand 
  * enables live trading (engine/adapter-service.ts decodes this base58 key).
  */
 function loadWalletPrivateKey(): Effect.Effect<string> {
-  return Config.string("WALLET_PRIVATE_KEY").pipe(
+  return Config.String("WALLET_PRIVATE_KEY").pipe(
     Effect.orElseSucceed(() => loadKeystoreSecretKeyBase58() ?? ""),
   );
 }
@@ -1172,21 +1172,21 @@ interface JevSettings {
  */
 function loadJevSettings(): Effect.Effect<JevSettings> {
   return Effect.gen(function* () {
-    const jevEnabled = yield* Config.boolean("JEV_ENABLED").pipe(Effect.orElseSucceed(() => false));
-    const jevApiKeyPrimary = yield* Config.string("TYPESAFE_API_KEY").pipe(
+    const jevEnabled = yield* Config.Boolean("JEV_ENABLED").pipe(Effect.orElseSucceed(() => false));
+    const jevApiKeyPrimary = yield* Config.String("TYPESAFE_API_KEY").pipe(
       Effect.orElseSucceed(() => ""),
     );
-    const jevApiKeyLegacy = yield* Config.string("TYPESAFEAI_API").pipe(
+    const jevApiKeyLegacy = yield* Config.String("TYPESAFEAI_API").pipe(
       Effect.orElseSucceed(() => ""),
     );
-    const jevBaseUrl = yield* Config.string("JEV_BASE_URL").pipe(
+    const jevBaseUrl = yield* Config.String("JEV_BASE_URL").pipe(
       Effect.orElseSucceed(() => "https://api.typesafe.ai/v1/systemone"),
     );
-    const jevModel = yield* Config.string("JEV_MODEL").pipe(
+    const jevModel = yield* Config.String("JEV_MODEL").pipe(
       Effect.orElseSucceed(() => "jev-latest"),
     );
     const jevTimeoutMs = yield* validatedNumber("JEV_TIMEOUT_MS", 1_000, 10_000, 60_000);
-    const jevStressHalveEnabled = yield* Config.boolean("JEV_STRESS_HALVE_ENABLED").pipe(
+    const jevStressHalveEnabled = yield* Config.Boolean("JEV_STRESS_HALVE_ENABLED").pipe(
       Effect.orElseSucceed(() => false),
     );
     const jevStressHalveThreshold = yield* validatedNumber(
@@ -1211,18 +1211,18 @@ const loadConfig = Effect.gen(function* () {
   const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
   const walletPrivateKey = yield* loadWalletPrivateKey();
-  const heliusApiKey = yield* Config.string("HELIUS_API_KEY").pipe(
+  const heliusApiKey = yield* Config.String("HELIUS_API_KEY").pipe(
     Effect.orElseSucceed(() => (isTest ? "test-helius-key" : "")),
   );
-  const heliusDasDisabled = yield* Config.boolean("HELIUS_DAS_DISABLED").pipe(
+  const heliusDasDisabled = yield* Config.Boolean("HELIUS_DAS_DISABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const solanaRpcUrlRaw = yield* Config.string("SOLANA_RPC_URL").pipe(
+  const solanaRpcUrlRaw = yield* Config.String("SOLANA_RPC_URL").pipe(
     Effect.orElseSucceed(() =>
       isTest ? "https://example.com" : "https://api.mainnet-beta.solana.com",
     ),
   );
-  const solanaRpcFallbackUrlRaw = yield* Config.string("SOLANA_RPC_FALLBACK_URL").pipe(
+  const solanaRpcFallbackUrlRaw = yield* Config.String("SOLANA_RPC_FALLBACK_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
 
@@ -1249,14 +1249,14 @@ const loadConfig = Effect.gen(function* () {
   // DLMM.create costs 1-2 Solana RPC reads per pool; the lbPair immutable
   // fields do not change, so a longer TTL skips re-creation on repeat cycles.
   const dlmmCacheTtlMs = yield* validatedNumber("DLMM_CACHE_TTL_MS", 60_000, 300_000, 3_600_000);
-  const paperTrading = yield* Config.boolean("PAPER_TRADING").pipe(
+  const paperTrading = yield* Config.Boolean("PAPER_TRADING").pipe(
     Effect.orElseSucceed(() => true),
   );
-  const autonomousTokenModeRaw = yield* Config.string("AUTONOMOUS_TOKEN_MODE").pipe(
+  const autonomousTokenModeRaw = yield* Config.String("AUTONOMOUS_TOKEN_MODE").pipe(
     Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.autonomousTokenMode),
   );
   const autonomousTokenMode = yield* parseAutonomousTokenMode(autonomousTokenModeRaw);
-  const settlementAssetRaw = yield* Config.string("SETTLEMENT_ASSET").pipe(
+  const settlementAssetRaw = yield* Config.String("SETTLEMENT_ASSET").pipe(
     Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.settlementAsset),
   );
   const settlementAsset: SettlementAsset = yield* parseSettlementAsset(settlementAssetRaw);
@@ -1289,7 +1289,7 @@ const loadConfig = Effect.gen(function* () {
     1,
     AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxMarketDataAgeMs,
   );
-  const maxSwapSlippageBpsRaw = yield* Config.string("MAX_SWAP_SLIPPAGE_BPS").pipe(
+  const maxSwapSlippageBpsRaw = yield* Config.String("MAX_SWAP_SLIPPAGE_BPS").pipe(
     Effect.orElseSucceed(() => ""),
   );
   yield* dieIfNotIntegerEnv("MAX_SWAP_SLIPPAGE_BPS", maxSwapSlippageBpsRaw);
@@ -1329,7 +1329,7 @@ const loadConfig = Effect.gen(function* () {
       AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxConsecutiveExecutionFailures,
     ),
   );
-  const agentInstanceIdRaw = yield* Config.string("AGENT_INSTANCE_ID").pipe(
+  const agentInstanceIdRaw = yield* Config.String("AGENT_INSTANCE_ID").pipe(
     Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.agentInstanceId),
   );
   const agentInstanceId = yield* requireAgentInstanceId(agentInstanceIdRaw);
@@ -1348,13 +1348,13 @@ const loadConfig = Effect.gen(function* () {
   const paperPortfolioUsd = yield* validatedNumber("PAPER_PORTFOLIO_USD", 1, 10_000);
   const minBinUtilization = yield* validatedNumber("MIN_BIN_UTILIZATION", 0, 0.3, 1);
   const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 200, 200);
-  const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
+  const watchlistPoolsRaw = yield* Config.String("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),
   );
   // Default = the verified stablecoin mints (USDC, USDT, PYUSD). An explicit
   // empty value (STABLECOIN_MINTS=) is present, not absent, so it disables the
   // allowlist (empty set). Entries are pubkey-validated below, fail-closed.
-  const stablecoinMintsRaw = yield* Config.string("STABLECOIN_MINTS").pipe(
+  const stablecoinMintsRaw = yield* Config.String("STABLECOIN_MINTS").pipe(
     Effect.orElseSucceed(
       () =>
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v,Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB,2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
@@ -1369,17 +1369,17 @@ const loadConfig = Effect.gen(function* () {
     12,
   );
 
-  const freezeSmartScreening = yield* Config.boolean("FREEZE_SMART_SCREENING").pipe(
+  const freezeSmartScreening = yield* Config.Boolean("FREEZE_SMART_SCREENING").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const ilProtectionEnabled = yield* Config.boolean("IL_PROTECTION_ENABLED").pipe(
+  const ilProtectionEnabled = yield* Config.Boolean("IL_PROTECTION_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
   const ilDominanceExitFactor = yield* validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2);
   const ilDominanceMinUsd = yield* validatedNumber("IL_DOMINANCE_MIN_USD", 0, 5);
   const dustExitUsd = yield* validatedNumber("DUST_EXIT_USD", 0, 5);
 
-  const jupiterTokenRiskEnabled = yield* Config.boolean("JUPITER_TOKEN_RISK_ENABLED").pipe(
+  const jupiterTokenRiskEnabled = yield* Config.Boolean("JUPITER_TOKEN_RISK_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
   const jupiterTokenRiskCacheTtlMin = yield* validatedNumber(
@@ -1388,11 +1388,11 @@ const loadConfig = Effect.gen(function* () {
     30,
   );
 
-  const goPlusApiKey = yield* Config.string("GOPLUS_API_KEY").pipe(Effect.orElseSucceed(() => ""));
-  const goPlusApiSecret = yield* Config.string("GOPLUS_API_SECRET").pipe(
+  const goPlusApiKey = yield* Config.String("GOPLUS_API_KEY").pipe(Effect.orElseSucceed(() => ""));
+  const goPlusApiSecret = yield* Config.String("GOPLUS_API_SECRET").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const goPlusTokenRiskEnabled = yield* Config.boolean("GOPLUS_TOKEN_RISK_ENABLED").pipe(
+  const goPlusTokenRiskEnabled = yield* Config.Boolean("GOPLUS_TOKEN_RISK_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
   const goPlusTokenRiskCacheTtlMin = yield* validatedNumber(
@@ -1401,11 +1401,11 @@ const loadConfig = Effect.gen(function* () {
     30,
   );
 
-  const geckoTerminalEnabled = yield* Config.boolean("GECKO_TERMINAL_ENABLED").pipe(
+  const geckoTerminalEnabled = yield* Config.Boolean("GECKO_TERMINAL_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
 
-  const dexscreenerEnabled = yield* Config.boolean("DEXSCREENER_ENABLED").pipe(
+  const dexscreenerEnabled = yield* Config.Boolean("DEXSCREENER_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
 
@@ -1425,10 +1425,10 @@ const loadConfig = Effect.gen(function* () {
   // required after that). The service is not consumed by any decision path, so
   // opting in only when a PYTH_API_KEY is present avoids a silently-dead
   // keyless poller after the cutoff. Set PYTH_ENABLED=true (with a key) to use it.
-  const pythEnabled = yield* Config.boolean("PYTH_ENABLED").pipe(Effect.orElseSucceed(() => false));
-  const pythApiKey = yield* Config.string("PYTH_API_KEY").pipe(Effect.orElseSucceed(() => ""));
+  const pythEnabled = yield* Config.Boolean("PYTH_ENABLED").pipe(Effect.orElseSucceed(() => false));
+  const pythApiKey = yield* Config.String("PYTH_API_KEY").pipe(Effect.orElseSucceed(() => ""));
   const pythMaxStalenessMs = yield* validatedNumber("PYTH_MAX_STALENESS_MS", 5_000, 60_000);
-  const pythBaseUrl = yield* Config.string("PYTH_BASE_URL").pipe(
+  const pythBaseUrl = yield* Config.String("PYTH_BASE_URL").pipe(
     Effect.orElseSucceed(() => "https://hermes.pyth.network"),
   );
 
@@ -1460,7 +1460,7 @@ const loadConfig = Effect.gen(function* () {
   const entryRangeHalfWidthBins = Math.floor(
     yield* validatedNumber("ENTRY_RANGE_HALF_WIDTH_BINS", 0, 0, 200),
   );
-  const volatilityAdaptiveRanges = yield* Config.boolean("VOLATILITY_ADAPTIVE_RANGES").pipe(
+  const volatilityAdaptiveRanges = yield* Config.Boolean("VOLATILITY_ADAPTIVE_RANGES").pipe(
     Effect.orElseSucceed(() => true),
   );
   // Profitability floor for fine-binStep pools: the resolved range half-width is
@@ -1480,12 +1480,12 @@ const loadConfig = Effect.gen(function* () {
   const minRangeHalfWidthPct = yield* validatedNumber("MIN_RANGE_HALF_WIDTH_PCT", 0, 5, 50);
 
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
-  const autoCompoundFees = yield* Config.boolean("AUTO_COMPOUND_FEES").pipe(
+  const autoCompoundFees = yield* Config.Boolean("AUTO_COMPOUND_FEES").pipe(
     Effect.orElseSucceed(() => false),
   );
   const minCompoundFeesUsd = yield* validatedNumber("MIN_COMPOUND_FEES_USD", 0, 0.5);
   const compoundGasBufferUsd = yield* validatedNumber("COMPOUND_GAS_BUFFER_USD", 0, 0.05);
-  const feeDestination: FeeDestination = yield* Config.string("FEE_DESTINATION").pipe(
+  const feeDestination: FeeDestination = yield* Config.String("FEE_DESTINATION").pipe(
     Config.withDefault("compound"),
     Effect.flatMap((value) => parseFeeDestination(value)),
     // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
@@ -1520,14 +1520,14 @@ const loadConfig = Effect.gen(function* () {
   );
 
   // ─── Idle-capital auto-redeploy (opt-in) ─────────────────────────────────
-  const idleRedeployEnabled = yield* Config.boolean("IDLE_REDEPLOY_ENABLED").pipe(
+  const idleRedeployEnabled = yield* Config.Boolean("IDLE_REDEPLOY_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const idleRedeployThresholdUsd = yield* validatedNumber("IDLE_REDEPLOY_THRESHOLD_USD", 0, 500);
   const idleRedeployMaxSizeUsd = yield* validatedNumber("IDLE_REDEPLOY_MAX_SIZE_USD", 0, 2000);
 
   // ─── Rolling realized-PnL loss halt ─────────────────────────────────────────
-  const realizedPnLHaltEnabled = yield* Config.boolean("REALIZED_PNL_HALT_ENABLED").pipe(
+  const realizedPnLHaltEnabled = yield* Config.Boolean("REALIZED_PNL_HALT_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const realizedPnLHaltWindow = yield* validatedNumber("REALIZED_PNL_HALT_WINDOW", 1, 100);
@@ -1538,7 +1538,7 @@ const loadConfig = Effect.gen(function* () {
   );
 
   // ─── Pool-local realized-PnL kill switch ─────────────────────────────────
-  const poolPnlKillSwitchEnabled = yield* Config.boolean("POOL_PNL_KILL_SWITCH_ENABLED").pipe(
+  const poolPnlKillSwitchEnabled = yield* Config.Boolean("POOL_PNL_KILL_SWITCH_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const poolPnlKillSwitchMinClosedPositions = yield* validatedNumber(
@@ -1561,7 +1561,7 @@ const loadConfig = Effect.gen(function* () {
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
   const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
-  const paperValidationEnforce = yield* Config.boolean("PAPER_VALIDATION_ENFORCE").pipe(
+  const paperValidationEnforce = yield* Config.Boolean("PAPER_VALIDATION_ENFORCE").pipe(
     Effect.orElseSucceed(() => false),
   );
 
@@ -1582,7 +1582,7 @@ const loadConfig = Effect.gen(function* () {
   );
 
   // ─── Fee-density-driven low-yield exit cooldowns ────────────────────────────
-  const feeDensityCooldowns = yield* Config.boolean("FEE_DENSITY_COOLDOWNS").pipe(
+  const feeDensityCooldowns = yield* Config.Boolean("FEE_DENSITY_COOLDOWNS").pipe(
     Effect.orElseSucceed(() => true),
   );
   const DEFAULT_FEE_DENSITY_COOLDOWN_MIN_MS = 60 * 60 * 1000;
@@ -1637,10 +1637,10 @@ const loadConfig = Effect.gen(function* () {
     : feeDensityLowPctRaw;
 
   // ─── Agentic mode / agent runtime overlay ────────────────────────────
-  const agentiveMode = yield* Config.boolean("AGENTIC_MODE").pipe(
+  const agentiveMode = yield* Config.Boolean("AGENTIC_MODE").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const agentRuntimeRaw = yield* Config.string("AGENT_RUNTIME").pipe(
+  const agentRuntimeRaw = yield* Config.String("AGENT_RUNTIME").pipe(
     Effect.orElseSucceed(() => "auto"),
   );
   const validAgentRuntimes = ["auto", "hermes", "openclaw", "none"] as const;
@@ -1653,20 +1653,20 @@ const loadConfig = Effect.gen(function* () {
       // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       (agentRuntimeRaw as (typeof validAgentRuntimes)[number])
     : "auto";
-  const agentAcpCommand = yield* Config.string("AGENT_ACP_COMMAND").pipe(
+  const agentAcpCommand = yield* Config.String("AGENT_ACP_COMMAND").pipe(
     Effect.orElseSucceed(() => "hermes"),
   );
-  const agentAcpArgsRaw = yield* Config.string("AGENT_ACP_ARGS").pipe(
+  const agentAcpArgsRaw = yield* Config.String("AGENT_ACP_ARGS").pipe(
     Effect.orElseSucceed(() => "acp"),
   );
   const agentAcpArgs = agentAcpArgsRaw
     .split(" ")
     .map((s) => s.trim())
     .filter(Boolean);
-  const agentGatewayUrl = yield* Config.string("AGENT_GATEWAY_URL").pipe(
+  const agentGatewayUrl = yield* Config.String("AGENT_GATEWAY_URL").pipe(
     Effect.orElseSucceed(() => "ws://127.0.0.1:18789"),
   );
-  const agentGatewayToken = yield* Config.string("AGENT_GATEWAY_TOKEN").pipe(
+  const agentGatewayToken = yield* Config.String("AGENT_GATEWAY_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
   const agentPromptTimeoutMs = yield* validatedNumber(
@@ -1691,32 +1691,32 @@ const loadConfig = Effect.gen(function* () {
     0,
     60 * 60 * 1000,
   );
-  const agentCheckinOnEvents = yield* Config.boolean("AGENT_CHECKIN_ON_EVENTS").pipe(
+  const agentCheckinOnEvents = yield* Config.Boolean("AGENT_CHECKIN_ON_EVENTS").pipe(
     Effect.orElseSucceed(() => true),
   );
-  const agentCheckinIncludeHistory = yield* Config.boolean("AGENT_CHECKIN_INCLUDE_HISTORY").pipe(
+  const agentCheckinIncludeHistory = yield* Config.Boolean("AGENT_CHECKIN_INCLUDE_HISTORY").pipe(
     Effect.orElseSucceed(() => true),
   );
   const agentCheckinMaxPositions = yield* validatedNumber("AGENT_CHECKIN_MAX_POSITIONS", 0, 10);
-  const agentOpenclawWebhookUrl = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_URL").pipe(
+  const agentOpenclawWebhookUrl = yield* Config.String("AGENT_OPENCLAW_WEBHOOK_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentOpenclawWebhookToken = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_TOKEN").pipe(
+  const agentOpenclawWebhookToken = yield* Config.String("AGENT_OPENCLAW_WEBHOOK_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentHermesApiUrl = yield* Config.string("AGENT_HERMES_API_URL").pipe(
+  const agentHermesApiUrl = yield* Config.String("AGENT_HERMES_API_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentHermesApiToken = yield* Config.string("AGENT_HERMES_API_TOKEN").pipe(
+  const agentHermesApiToken = yield* Config.String("AGENT_HERMES_API_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
   const agentHttpPort = yield* validatedNumber("AGENT_HTTP_PORT", 0, 0, 65_535);
-  const agentMcpEnabled = yield* Config.boolean("AGENT_MCP_ENABLED").pipe(
+  const agentMcpEnabled = yield* Config.Boolean("AGENT_MCP_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
 
   // ─── Agent Proposals ───────────────────────────────────────────────────────
-  const agentProposalModeRaw = yield* Config.string("AGENT_PROPOSAL_MODE").pipe(
+  const agentProposalModeRaw = yield* Config.String("AGENT_PROPOSAL_MODE").pipe(
     Effect.orElseSucceed(() => "veto"),
   );
   const validAgentProposalModes = ["veto", "suggest", "supervised", "full"] as const;
@@ -1729,10 +1729,10 @@ const loadConfig = Effect.gen(function* () {
       // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       (agentProposalModeRaw as (typeof validAgentProposalModes)[number])
     : "veto";
-  const agentProposalToken = yield* Config.string("AGENT_PROPOSAL_TOKEN").pipe(
+  const agentProposalToken = yield* Config.String("AGENT_PROPOSAL_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentApprovalToken = yield* Config.string("AGENT_APPROVAL_TOKEN").pipe(
+  const agentApprovalToken = yield* Config.String("AGENT_APPROVAL_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
   const agentProposalTimeoutMs = yield* validatedNumber(
@@ -1819,10 +1819,10 @@ const loadConfig = Effect.gen(function* () {
     0.1,
     1.8,
   );
-  const autoSwapEntry = yield* Config.boolean("AUTO_SWAP_ENTRY").pipe(
+  const autoSwapEntry = yield* Config.Boolean("AUTO_SWAP_ENTRY").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const entryStrategyTypeRaw = yield* Config.string("ENTRY_STRATEGY_TYPE").pipe(
+  const entryStrategyTypeRaw = yield* Config.String("ENTRY_STRATEGY_TYPE").pipe(
     Effect.orElseSucceed(() => "spot"),
   );
   const validEntryStrategyTypes = ["spot", "curve", "bidask", "auto"] as const;
@@ -1837,17 +1837,17 @@ const loadConfig = Effect.gen(function* () {
     : "spot";
 
   // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
-  const alertsEnabled = yield* Config.boolean("ALERTS_ENABLED").pipe(
+  const alertsEnabled = yield* Config.Boolean("ALERTS_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
   // ─── LM farm reward claims (Wave 8) ───────────────────────────────────────
-  const farmRewardsEnabled = yield* Config.boolean("FARM_REWARDS_ENABLED").pipe(
+  const farmRewardsEnabled = yield* Config.Boolean("FARM_REWARDS_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
-  const limitOrdersEnabled = yield* Config.boolean("LIMIT_ORDERS_ENABLED").pipe(
+  const limitOrdersEnabled = yield* Config.Boolean("LIMIT_ORDERS_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const limitOrderModeRaw = yield* Config.string("LIMIT_ORDER_MODE").pipe(
+  const limitOrderModeRaw = yield* Config.String("LIMIT_ORDER_MODE").pipe(
     Effect.orElseSucceed(() => "take-profit"),
   );
   const limitOrderMode = coerceOneOf(
@@ -1861,13 +1861,13 @@ const loadConfig = Effect.gen(function* () {
     0,
     3,
   );
-  const copySignalsEnabled = yield* Config.boolean("COPY_SIGNALS_ENABLED").pipe(
+  const copySignalsEnabled = yield* Config.Boolean("COPY_SIGNALS_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const copySignalsEndpoint = yield* Config.string("COPY_SIGNALS_ENDPOINT").pipe(
+  const copySignalsEndpoint = yield* Config.String("COPY_SIGNALS_ENDPOINT").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const copySignalWalletsRaw = yield* Config.string("COPY_SIGNAL_WALLETS").pipe(
+  const copySignalWalletsRaw = yield* Config.String("COPY_SIGNAL_WALLETS").pipe(
     Effect.orElseSucceed(() => ""),
   );
   const copySignalWallets = copySignalWalletsRaw
@@ -1885,7 +1885,7 @@ const loadConfig = Effect.gen(function* () {
   const alertFeeMilestoneUsd = yield* validatedNumber("ALERT_FEE_MILESTONE_USD", 0.01, 10);
 
   // ─── Fallen-angel mode (Wave 19) ───────────────────────────────────────────
-  const fallenAngelEnabled = yield* Config.boolean("FALLEN_ANGEL_ENABLED").pipe(
+  const fallenAngelEnabled = yield* Config.Boolean("FALLEN_ANGEL_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const fallenAngelMinTvlUsd = yield* validatedNumber("FALLEN_ANGEL_MIN_TVL_USD", 0, 50_000);
@@ -1932,12 +1932,12 @@ const loadConfig = Effect.gen(function* () {
       .map(Number)
       .filter((n) => Number.isFinite(n));
   const fallenAngelTpRungs = parsePctList(
-    yield* Config.string("FALLEN_ANGEL_TP_RUNGS").pipe(
+    yield* Config.String("FALLEN_ANGEL_TP_RUNGS").pipe(
       Effect.orElseSucceed(() => "0.15,0.30,0.50"),
     ),
   );
   const fallenAngelTpFractions = parsePctList(
-    yield* Config.string("FALLEN_ANGEL_TP_FRACTIONS").pipe(
+    yield* Config.String("FALLEN_ANGEL_TP_FRACTIONS").pipe(
       Effect.orElseSucceed(() => "0.4,0.3,0.3"),
     ),
   );
@@ -1964,12 +1964,12 @@ const loadConfig = Effect.gen(function* () {
     0,
     24 * 60 * 60 * 1000,
   );
-  const enablePoolDiscovery = yield* Config.boolean("ENABLE_POOL_DISCOVERY").pipe(
+  const enablePoolDiscovery = yield* Config.Boolean("ENABLE_POOL_DISCOVERY").pipe(
     Effect.orElseSucceed(() => false),
   );
   const discoveryMinTvlUsd = yield* validatedNumber("DISCOVERY_MIN_TVL_USD", 0, 1_000_000);
   const discoveryMinFeeRatio = yield* validatedNumber("DISCOVERY_MIN_FEE_RATIO", 0, 1.5);
-  const marketScanEnabled = yield* Config.boolean("MARKET_SCAN_ENABLED").pipe(
+  const marketScanEnabled = yield* Config.Boolean("MARKET_SCAN_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const marketScanRefreshIntervalMs = yield* validatedNumber(
@@ -1978,7 +1978,7 @@ const loadConfig = Effect.gen(function* () {
     30 * 60_000,
   );
   const marketScanUniversePages = yield* validatedNumber("MARKET_SCAN_UNIVERSE_PAGES", 1, 3, 10);
-  const marketScanUniverseSortRaw = yield* Config.string("MARKET_SCAN_UNIVERSE_SORT").pipe(
+  const marketScanUniverseSortRaw = yield* Config.String("MARKET_SCAN_UNIVERSE_SORT").pipe(
     Effect.orElseSucceed(() => "tvl"),
   );
   const marketScanUniverseSort = coerceOneOf(
@@ -1997,7 +1997,7 @@ const loadConfig = Effect.gen(function* () {
   // holds HIGH-YIELD pools rather than flat majors. Rotation exits the lowest-
   // APR held position when the portfolio is full and a much hotter runner is
   // available. OFF by default; paper-first.
-  const marketScanRunnerEnabled = yield* Config.boolean("MARKET_SCAN_RUNNER_ENABLED").pipe(
+  const marketScanRunnerEnabled = yield* Config.Boolean("MARKET_SCAN_RUNNER_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const marketScanRunnerMinFeeApr = yield* validatedNumber(
@@ -2016,7 +2016,7 @@ const loadConfig = Effect.gen(function* () {
     -8,
     0,
   );
-  const marketScanRotationEnabled = yield* Config.boolean("MARKET_SCAN_ROTATION_ENABLED").pipe(
+  const marketScanRotationEnabled = yield* Config.Boolean("MARKET_SCAN_ROTATION_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const marketScanRotationAprMult = yield* validatedNumber("MARKET_SCAN_ROTATION_APR_MULT", 1, 5);
@@ -2054,7 +2054,7 @@ const loadConfig = Effect.gen(function* () {
   // Herding damper: block NEW ENTERs while scanned pools move in lockstep
   // (systemic stress — the window where rugs cluster). Fail-open: unknown
   // correlation state never blocks; exits are never affected.
-  const regimeHerdingGateEnabled = yield* Config.boolean("REGIME_HERDING_GATE_ENABLED").pipe(
+  const regimeHerdingGateEnabled = yield* Config.Boolean("REGIME_HERDING_GATE_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const regimeHerdingEdgeThreshold = yield* validatedNumber(
@@ -2072,7 +2072,7 @@ const loadConfig = Effect.gen(function* () {
   // Euphoria damper (runner lane): reject a runner whose current measured APR
   // is a vertical spike vs its OWN recent history (top-percentile self-rank).
   // Durable high APR is flat-high and passes; blow-off tops fail.
-  const runnerAprOutlierEnabled = yield* Config.boolean("RUNNER_APR_OUTLIER_ENABLED").pipe(
+  const runnerAprOutlierEnabled = yield* Config.Boolean("RUNNER_APR_OUTLIER_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const runnerAprOutlierPercentile = yield* validatedNumber(
@@ -2087,7 +2087,7 @@ const loadConfig = Effect.gen(function* () {
   // baseline is the EARLY entry signal while the 1h fee ratio still lags its
   // floor. Signal source is the pool_snapshots history we already persist —
   // zero new API load. Measured stats only; default OFF.
-  const flashVolumeTriggerEnabled = yield* Config.boolean("FLASH_VOLUME_TRIGGER_ENABLED").pipe(
+  const flashVolumeTriggerEnabled = yield* Config.Boolean("FLASH_VOLUME_TRIGGER_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const flashMinSpikeRatio = yield* validatedNumber("FLASH_MIN_SPIKE_RATIO", 1, 1.2, 20);
@@ -2106,13 +2106,13 @@ const loadConfig = Effect.gen(function* () {
     4,
     100,
   );
-  const holdBiasEnabled = yield* Config.boolean("HOLD_BIAS_ENABLED").pipe(
+  const holdBiasEnabled = yield* Config.Boolean("HOLD_BIAS_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   // Laddering: tight+wide split for fee capture vs buffer. Default OFF — when ON an ENTER
   // is executed as two positions (half size each) with scaled half-widths, reusing the
   // existing MAX_POSITIONS_PER_POOL=2 capacity. Tight leg harvests fees, wide leg survives chop.
-  const ladderEnabled = yield* Config.boolean("LADDER_ENABLED").pipe(
+  const ladderEnabled = yield* Config.Boolean("LADDER_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const ladderTightMult = yield* validatedNumber("LADDER_TIGHT_MULT", 0.1, 0.6, 2);
@@ -2139,7 +2139,7 @@ const loadConfig = Effect.gen(function* () {
   const harvestTxCostUsdEst = yield* validatedNumber("HARVEST_TX_COST_USD_EST", 0, 0.005);
   // G5 transfer-tax screen: reject legs with an enabled Token-2022
   // transfer-fee extension unless explicitly allowed.
-  const allowTransferFeeTokens = yield* Config.boolean("ALLOW_TRANSFER_FEE_TOKENS").pipe(
+  const allowTransferFeeTokens = yield* Config.Boolean("ALLOW_TRANSFER_FEE_TOKENS").pipe(
     Effect.orElseSucceed(() => false),
   );
   // G6 token-level failure breaker: a failed EXIT on a token blocks new
@@ -2203,19 +2203,19 @@ const loadConfig = Effect.gen(function* () {
   const entryMomentumScoreWeight = yield* validatedNumber("ENTRY_MOMENTUM_SCORE_WEIGHT", 0, 0.15);
   // C: take-profit for normal positions (winrate — lock profits instead of
   // waiting for a loss-side exit). Single-rung full exit at the target.
-  const takeProfitEnabled = yield* Config.boolean("TAKE_PROFIT_ENABLED").pipe(
+  const takeProfitEnabled = yield* Config.Boolean("TAKE_PROFIT_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const takeProfitPct = yield* validatedNumber("TAKE_PROFIT_PCT", 0.01, 0.15); // 0 would build an at-entry rung -> instant zero-profit EXIT
   // D: backtest replay fidelity — empty-bin snapshots must not reject every
   // tick (paper DB stores bins:[] so the replay admitted nothing).
-  const backtestTolerateEmptyBins = yield* Config.boolean("BACKTEST_TOLERATE_EMPTY_BINS").pipe(
+  const backtestTolerateEmptyBins = yield* Config.Boolean("BACKTEST_TOLERATE_EMPTY_BINS").pipe(
     Effect.orElseSucceed(() => true),
   );
   const marketScanTopK = yield* validatedNumber("MARKET_SCAN_TOP_K", 1, 30, 200);
   const marketScanMaxPools = yield* validatedNumber("MARKET_SCAN_MAX_POOLS", 1, 60, 500);
   const marketScanMinHolders = yield* validatedNumber("MARKET_SCAN_MIN_HOLDERS", 0, 1000);
-  const marketScanRequireRenouncedMint = yield* Config.boolean(
+  const marketScanRequireRenouncedMint = yield* Config.Boolean(
     "MARKET_SCAN_REQUIRE_RENOUNCED_MINT",
   ).pipe(Effect.orElseSucceed(() => true));
   const marketScanVerifiedExemptMinTvlUsd = yield* validatedNumber(
@@ -2231,7 +2231,7 @@ const loadConfig = Effect.gen(function* () {
   );
   const marketScanMinBinStep = yield* validatedNumber("MARKET_SCAN_MIN_BIN_STEP", 0, 2, 100);
   const marketScanMaxBinStep = yield* validatedNumber("MARKET_SCAN_MAX_BIN_STEP", 1, 200, 2000);
-  const launchScanEnabled = yield* Config.boolean("LAUNCH_SCAN_ENABLED").pipe(
+  const launchScanEnabled = yield* Config.Boolean("LAUNCH_SCAN_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const launchScanRefreshIntervalMs = yield* validatedNumber(
@@ -2256,7 +2256,7 @@ const loadConfig = Effect.gen(function* () {
   // ─── Launch Mode v2: execution lane ───────────────────────────────────────
   // Launch EXECUTION is opt-in on top of the launch radar; both switches must
   // be on for the lane to exist (Slice B wiring).
-  const launchExecutionEnabled = yield* Config.boolean("LAUNCH_EXECUTION_ENABLED").pipe(
+  const launchExecutionEnabled = yield* Config.Boolean("LAUNCH_EXECUTION_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const launchMaxOpenPositions = yield* validatedNumber("LAUNCH_MAX_OPEN_POSITIONS", 1, 3, 30);
@@ -2276,7 +2276,7 @@ const loadConfig = Effect.gen(function* () {
   // getting stopped by them) with a tight HALF_WIDTH band, and launch exits
   // use the wider runner DRAWDOWN (shakeout tolerance) instead of the crash
   // calibration. The timebox and volume-decay exits are unchanged.
-  const launchRunnerModeEnabled = yield* Config.boolean("LAUNCH_RUNNER_MODE_ENABLED").pipe(
+  const launchRunnerModeEnabled = yield* Config.Boolean("LAUNCH_RUNNER_MODE_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const launchRunnerDipPct = yield* validatedNumber("LAUNCH_RUNNER_DIP_PCT", 0, 0.12, 0.5);
@@ -2294,7 +2294,7 @@ const loadConfig = Effect.gen(function* () {
   // and top up the position with fresh quote capital (atomic rebalance
   // redeposits the mixed basket + top-up). Persisted per position
   // (launch_runner_steps / launch_runner_anchor_price), restart-safe.
-  const launchRunnerScaleInEnabled = yield* Config.boolean("LAUNCH_RUNNER_SCALE_IN_ENABLED").pipe(
+  const launchRunnerScaleInEnabled = yield* Config.Boolean("LAUNCH_RUNNER_SCALE_IN_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
   const launchRunnerScaleInStepPct = yield* validatedNumber(
@@ -2316,32 +2316,32 @@ const loadConfig = Effect.gen(function* () {
   // wallet-concentration / burst-density evidence that flags wash volume
   // before ENTER. OFF by default (RPC cost + heuristic noise); advisory in
   // the radar log, hard-rejecting only at egregious thresholds.
-  const launchWashForensicsEnabled = yield* Config.boolean("LAUNCH_WASH_FORENSICS_ENABLED").pipe(
+  const launchWashForensicsEnabled = yield* Config.Boolean("LAUNCH_WASH_FORENSICS_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
 
-  const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(
+  const deployerBlacklistPath = yield* Config.String("DEPLOYER_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/deployer-blacklist.json"),
   );
-  const tokenBlacklistPath = yield* Config.string("TOKEN_BLACKLIST_PATH").pipe(
+  const tokenBlacklistPath = yield* Config.String("TOKEN_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/token-blacklist.json"),
   );
-  const sqliteDbPath = yield* Config.string("SQLITE_DB_PATH").pipe(
+  const sqliteDbPath = yield* Config.String("SQLITE_DB_PATH").pipe(
     Effect.orElseSucceed(() => getPrismDbPath()),
   );
-  const enableSnapshotCapture = yield* Config.boolean("ENABLE_SNAPSHOT_CAPTURE").pipe(
+  const enableSnapshotCapture = yield* Config.Boolean("ENABLE_SNAPSHOT_CAPTURE").pipe(
     Effect.orElseSucceed(() => false),
   );
   const snapshotRetentionDays = yield* validatedNumber("SNAPSHOT_RETENTION_DAYS", 1, 14);
 
   // Auto-update config
-  const autoUpdate = yield* Config.boolean("AUTO_UPDATE").pipe(Effect.orElseSucceed(() => true));
+  const autoUpdate = yield* Config.Boolean("AUTO_UPDATE").pipe(Effect.orElseSucceed(() => true));
   const updateCheckIntervalMs = yield* validatedNumber(
     "UPDATE_CHECK_INTERVAL_MS",
     60_000,
     21_600_000,
   );
-  const updateChannelRaw = yield* Config.string("UPDATE_CHANNEL").pipe(
+  const updateChannelRaw = yield* Config.String("UPDATE_CHANNEL").pipe(
     Effect.orElseSucceed(() => "stable"),
   );
   const validChannels = ["stable", "beta", "dev", "canary"] as const;
@@ -2350,34 +2350,34 @@ const loadConfig = Effect.gen(function* () {
     ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       (updateChannelRaw as (typeof validChannels)[number])
     : "stable";
-  const updateGithubRepo = yield* Config.string("UPDATE_GITHUB_REPO").pipe(
+  const updateGithubRepo = yield* Config.String("UPDATE_GITHUB_REPO").pipe(
     Effect.orElseSucceed(() => "irfndi/prism-liquidity-agent"),
   );
-  const updateAllowDirty = yield* Config.boolean("UPDATE_ALLOW_DIRTY").pipe(
+  const updateAllowDirty = yield* Config.Boolean("UPDATE_ALLOW_DIRTY").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const forceUpdateEnabled = yield* Config.boolean("FORCE_UPDATE_ENABLED").pipe(
+  const forceUpdateEnabled = yield* Config.Boolean("FORCE_UPDATE_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const forceUpdateAfterDays = yield* validatedNumber("FORCE_UPDATE_AFTER_DAYS", 1, 14);
 
-  const githubToken = yield* Config.string("GITHUB_TOKEN").pipe(Effect.orElseSucceed(() => ""));
-  const githubRepo = yield* Config.string("GITHUB_REPO").pipe(
+  const githubToken = yield* Config.String("GITHUB_TOKEN").pipe(Effect.orElseSucceed(() => ""));
+  const githubRepo = yield* Config.String("GITHUB_REPO").pipe(
     Effect.orElseSucceed(() => "irfndi/prism-liquidity-agent"),
   );
-  const feedbackOptOut = yield* Config.boolean("PRISM_FEEDBACK_OPT_OUT").pipe(
+  const feedbackOptOut = yield* Config.Boolean("PRISM_FEEDBACK_OPT_OUT").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const paperModeExitLive = yield* Config.boolean("PAPER_MODE_EXIT_LIVE").pipe(
+  const paperModeExitLive = yield* Config.Boolean("PAPER_MODE_EXIT_LIVE").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const meteoraPoolsUrlRaw = yield* Config.string("METEORA_POOLS_URL").pipe(
+  const meteoraPoolsUrlRaw = yield* Config.String("METEORA_POOLS_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
   const meteoraPoolsUrl =
     meteoraPoolsUrlRaw ||
     "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
-  const meteoraDatapiBaseUrl = yield* Config.string("METEORA_DATA_API_URL").pipe(
+  const meteoraDatapiBaseUrl = yield* Config.String("METEORA_DATA_API_URL").pipe(
     Effect.orElseSucceed(() => "https://dlmm.datapi.meteora.ag"),
   );
 
@@ -2388,7 +2388,7 @@ const loadConfig = Effect.gen(function* () {
   );
 
   // ── Hot-window capture lane knobs ────────────────────────────────────────
-  const hotWindowEnabled = yield* Config.boolean("HOT_WINDOW_ENABLED").pipe(
+  const hotWindowEnabled = yield* Config.Boolean("HOT_WINDOW_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
   const hotWindowEntrySizeUsd = yield* validatedNumber("HOT_WINDOW_ENTRY_SIZE_USD", 5, 30, 500);

@@ -19,7 +19,6 @@ import {
   evaluatePaperValidation,
 } from "./risk-service.js";
 import {
-  computeBinVolatilityStddev,
   isHighVolatility,
   recommendBinRangeForVolatility,
   dipOffsetBinsForPct,
@@ -40,6 +39,12 @@ import {
   DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
 } from "./strategy-service.js";
 import type { EvolvableThresholds } from "./strategy-service.js";
+import {
+  assemblePoolFacts,
+  assemblePositionFacts,
+  hodlBenchmarkUsd,
+  resolvePoolDriftMetrics,
+} from "./cycle/facts.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive, type ScreenerConfig } from "./screener-service.js";
@@ -245,8 +250,10 @@ import {
   oldestActiveSettlementAgeMs,
   persistDailyEquityBaseline,
   processSettlementJobs,
+  persistSweptSettlementJobs,
   safetyPauseBlockReason,
   settlementOverduePauseAction,
+  shouldAutoResolveCoreDataPause,
   shouldAutoResolveDailyDrawdownPause,
   shouldAutoResolveExecutionFailuresPause,
   decayExecutionFailureCounter,
@@ -256,6 +263,7 @@ import {
 import { routeProbeAmountAtomic } from "./route-probe.js";
 import {
   estimateEntrySolLamports,
+  fitEntrySizeToSolBudget,
   freeEntrySolLamports,
   hasNativeSolLeg,
 } from "./entry-sol-budget.js";
@@ -370,9 +378,8 @@ export type TokenPriceMap = Record<string, number>;
  * yields `undefined`, which `prices[mint] != null` checks treat as unknown). */
 const EMPTY_TOKEN_PRICES: TokenPriceMap = Object.create(null);
 
-export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
-  return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
-}
+import { isProposalStale } from "./proposal-schema.js";
+export { isProposalStale };
 
 export function shouldHoldForSupervisedApproval(
   agentiveMode: boolean,
@@ -504,6 +511,33 @@ export interface JevStressHalveResult {
   readonly halved: boolean;
   readonly floored: boolean;
   readonly positionSizeUsd: number;
+}
+
+/**
+ * Shrink an approved ENTER to the free SOL budget. Returns null when the size
+ * already fits (keep the plan) or even the floor cannot be funded (skip).
+ */
+function resizeEnterToFreeSol(input: {
+  readonly desiredSizeUsd: number;
+  readonly freeSolLamports: bigint;
+  readonly solPriceUsd: number;
+  readonly poolHasSolLeg: boolean;
+}): { readonly sizeUsd: number; readonly lamports: bigint } | null {
+  const sizeUsd = fitEntrySizeToSolBudget({
+    ...input,
+    solFunded: true,
+    minSizeUsd: ENTRY_SIZE_FLOOR_USD,
+  });
+  if (sizeUsd === null || sizeUsd >= input.desiredSizeUsd) return null;
+  return {
+    sizeUsd,
+    lamports: estimateEntrySolLamports({
+      positionSizeUsd: sizeUsd,
+      solPriceUsd: input.solPriceUsd,
+      poolHasSolLeg: input.poolHasSolLeg,
+      solFunded: true,
+    }),
+  };
 }
 
 /** Halve the full size on stress, floored at ENTRY_SIZE_FLOOR_USD. Pure. */
@@ -1691,8 +1725,12 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const copySignalLayer = Layer.provide(CopySignalLive, configLayer);
   const merged17 = Layer.merge(merged16, copySignalLayer);
 
+  // A layer-construction failure (ConfigError) is a defect, not a recoverable
+  // program failure: buildLayer receives an already-validated config, so this
+  // only fires on a genuine bug. orDie makes the declared `never` error channel
+  // honest instead of asserted.
   // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  return merged17 as Layer.Layer<AllServices, never, never>;
+  return Layer.orDie(merged17) as Layer.Layer<AllServices, never, never>;
 }
 
 /**
@@ -3519,9 +3557,12 @@ function settleLiveExitAttribution(
     yield* recordExitSweepEvents(deps, decision, pool, pos, exitResultData, now);
     const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
     const pricingUnresolved = withdrawnUsd === null;
-    const realizedPnlUsd = exitResultData.isEmptyReap
-      ? 0
-      : pricingUnresolved || attributable.length > 0
+    // An empty reap withdrew nothing, but its cost basis cannot be trusted
+    // (the account held no liquidity, so the booked deposit may never have
+    // landed). Realized is n/a — booking 0 reads as a break-even trade and
+    // hides it from the rolling halt / kill switch.
+    const realizedPnlUsd =
+      exitResultData.isEmptyReap || pricingUnresolved || attributable.length > 0
         ? null
         : computeRealizedPnlUsd(
             withdrawnUsd,
@@ -3560,6 +3601,9 @@ function settleLiveExitAttribution(
           settlementPending: attributable.length,
           txSignature: exitResultData.txSignature,
           exitReason: decision.reasoning,
+          ...(exitResultData.isEmptyReap
+            ? { pricing: "unresolved" as const, emptyReap: true }
+            : undefined),
         },
         createdAt: now,
       })
@@ -3615,9 +3659,12 @@ function computeLedgerExitRealized(
   //    (exit swap, entry/exit gas, claim txs) debit the gross figure: they
   //    are spent on-chain but appear in no measured USD amount above.
   const modeledCostsUsd = isEmptyReap ? 0 : liveCloseCostsUsd(costs);
-  const realizedPnlUsd = isEmptyReap
-    ? 0
-    : pricingUnresolved
+  // Empty reap: nothing was withdrawn, but the cost basis is unverifiable —
+  // the on-chain account held zero liquidity, so the booked deposit may never
+  // have landed. Recording 0 would look like a break-even close and keep the
+  // position out of every PnL breaker. NULL (n/a) is the honest record.
+  const realizedPnlUsd =
+    isEmptyReap || pricingUnresolved
       ? null
       : computeRealizedPnlUsd(
           withdrawnUsd,
@@ -3832,13 +3879,15 @@ function buildExitMetadata(
   exitResultData: LiveExitResultData | null,
   modeledCostsUsd: number,
   exitReason?: string,
+  isEmptyReap = false,
 ) {
   const reason = exitReasonField(exitReason);
-  if (!pricingUnresolved) return { realizedPnlUsd, modeledCostsUsd, ...reason };
+  if (!pricingUnresolved && !isEmptyReap) return { realizedPnlUsd, modeledCostsUsd, ...reason };
   return {
     realizedPnlUsd,
     modeledCostsUsd,
     pricing: "unresolved",
+    ...(isEmptyReap ? { emptyReap: true } : undefined),
     lastMarkUsd: currentValueUsd,
     ...reason,
     ...unresolvedExitRaw(exitResultData),
@@ -3925,6 +3974,7 @@ function finalizeLiveExitLedger(
       exitResultData,
       modeledCostsUsd,
       decision.reasoning,
+      exitResultData?.isEmptyReap ?? false,
     );
     yield* deps.db
       .savePositionEvent({
@@ -4039,20 +4089,32 @@ function shouldRunIdleRedeploy(
 }
 
 /** Consecutive core-data-failure counter (full-cycle failure increments). */
-function updateCoreDataFailureCounter(
+/**
+ * Consecutive cycles in which core data was unavailable.
+ *
+ * Two shapes count as unavailable: every scanned pool failed, and a cycle
+ * that was EXPECTED to scan pools but scanned none. The second shape is the
+ * one that used to read as healthy — a dead RPC that makes discovery return
+ * nothing produces `poolsScanned === 0`, and `failuresThisCycle >= poolsScanned`
+ * is `0 >= 0`, so the old formula reset the counter mid-outage and the breaker
+ * saw a perfectly healthy agent. An empty scan set is only legitimate when
+ * nothing was expected (`expectedPools === 0`).
+ */
+export function updateCoreDataFailureCounter(
   consecutive: number,
   poolsScanned: number,
   failuresThisCycle: number,
+  expectedPools: number,
 ): number {
-  return poolsScanned > 0 && failuresThisCycle >= poolsScanned ? consecutive + 1 : 0;
+  if (poolsScanned === 0) return expectedPools > 0 ? consecutive + 1 : 0;
+  return failuresThisCycle >= poolsScanned ? consecutive + 1 : 0;
 }
 
-/** Safety-pause armed check (autonomous with an unresolved pause). */
-function isSafetyPauseArmed(
-  autonomousExecution: AutonomousExecutionContext | null,
+/** A safety pause is latched (armed) and unresolved. */
+export function isSafetyPauseArmed(
   activeSafetyPause: { readonly resolvedAt: number | null } | null,
-): autonomousExecution is AutonomousExecutionContext {
-  return autonomousExecution !== null && activeSafetyPause?.resolvedAt !== null;
+): boolean {
+  return activeSafetyPause !== null && activeSafetyPause.resolvedAt === null;
 }
 
 /** Aggregate unrealized PnL across tracked positions (PnL formula parity). */
@@ -6348,6 +6410,12 @@ export const program = Effect.gen(function* () {
   let marketRankedPools: ReadonlyArray<MarketPoolRank> = [];
   let lastMarketRefreshAt = 0;
   const marketScanPools = new Set<string>();
+  // Pools rejected by an IMMUTABLE safety fact (currently: a Token-2022
+  // transfer-fee extension, which cannot be removed from a mint). Rescreening
+  // them every cycle produced 48,723 identical HOLD rows on the live box and
+  // burned an on-chain mint read per cycle. Process-lifetime is exact: the
+  // fact cannot change without a restart (ALLOW_TRANSFER_FEE_TOKENS included).
+  const permanentlyUnsafePools = new Set<string>();
   // RugCheck reports cached for the process lifetime (security facts change
   // slowly; mints recur across discovery pages). Previously constructed per
   // fallen-angel refresh invocation, refetching identical mints every cycle.
@@ -6465,7 +6533,7 @@ export const program = Effect.gen(function* () {
       fallenAngelCandidatePools,
       launchScanPools,
       heldPoolAddresses: heldPools,
-    });
+    }).filter((address) => !permanentlyUnsafePools.has(address) || heldPools.has(address));
   };
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
@@ -6505,30 +6573,49 @@ export const program = Effect.gen(function* () {
               }),
             );
       const now = Date.now();
-      function settleCoolingCandidates(now: number): Effect.Effect<void, never> {
+      /**
+       * The one state advance a candidate is owed this cycle, or null.
+       *
+       * `cooling_down` returns to discovery once its cooldown lapsed. `entered`
+       * returns to discovery when its pool holds NO tracked position — the
+       * close may have happened through reconcile, an empty reap or a paper
+       * exit, none of which pass through the EXIT tail that used to be the only
+       * `cooldown_started` writer. Without this branch a candidate is "entered"
+       * forever and its token is never re-admitted for the life of the row.
+       */
+      function candidateSettlementEvent(
+        candidate: TokenCandidateRecord,
+        poolsWithPositions: ReadonlySet<string>,
+        observedAt: number,
+      ): Parameters<typeof transitionCandidate>[1] | null {
+        if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
+          return { kind: "cooldown_elapsed", occurredAt: observedAt };
+        }
+        if (candidate.state === "entered" && !poolsWithPositions.has(candidate.poolAddress)) {
+          return { kind: "entry_closed", occurredAt: observedAt };
+        }
+        return null;
+      }
+
+      function settleCandidateStates(observedAt: number): Effect.Effect<void, never> {
         return Effect.gen(function* () {
+          const poolsWithPositions = new Set<string>();
+          for (const pos of trackedPositions.values()) poolsWithPositions.add(pos.poolAddress);
           for (const candidate of autonomousCandidates.values()) {
-            if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
-              const advancedCandidate = transitionCandidate(
-                candidate,
-                { kind: "cooldown_elapsed", occurredAt: now },
-                {
-                  minHealthyScans: config.candidateMinHealthyScans,
-                  minObservationMs: config.candidateMinObservationMs,
-                },
-              );
-              if (advancedCandidate !== candidate) {
-                autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
-                yield* db
-                  .saveTokenCandidate(advancedCandidate)
-                  .pipe(Effect.catch(() => Effect.void));
-              }
-            }
+            const event = candidateSettlementEvent(candidate, poolsWithPositions, observedAt);
+            if (event === null) continue;
+            const advancedCandidate = transitionCandidate(candidate, event, {
+              minHealthyScans: config.candidateMinHealthyScans,
+              minObservationMs: config.candidateMinObservationMs,
+            });
+            if (advancedCandidate === candidate) continue;
+            autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
+            yield* db.saveTokenCandidate(advancedCandidate).pipe(Effect.catch(() => Effect.void));
           }
         });
       }
 
-      yield* settleCoolingCandidates(now);
+      yield* settleCandidateStates(now);
       const candidatePools = screened
         .filter(
           (pool) =>
@@ -8402,10 +8489,8 @@ export const program = Effect.gen(function* () {
           settlementDustUsd: autonomousExecution.settlementDustUsd,
           now: settlementNow,
         });
-        for (const job of orphanJobs) {
-          yield* db.saveSettlementJob(job).pipe(Effect.catch(() => Effect.void));
-        }
-        settlementJobs.push(...orphanJobs);
+        const persistedOrphanJobs = yield* persistSweptSettlementJobs(db, orphanJobs);
+        settlementJobs.push(...persistedOrphanJobs);
       }
       const processedJobs = yield* processSettlementJobs({
         adapter,
@@ -8420,7 +8505,11 @@ export const program = Effect.gen(function* () {
       // Issue #196 (clock skew): evaluate the overdue age against the SAME
       // clock the retry scheduling used (settlementNow) — a retry stamped
       // this cycle must never read as already-past against a fresher clock.
-      const oldestSettlementAgeMs = oldestActiveSettlementAgeMs(processedJobs, settlementNow);
+      const oldestSettlementAgeMs = oldestActiveSettlementAgeMs(
+        processedJobs,
+        settlementNow,
+        config.settlementMaxPendingMs,
+      );
       const pauseAction = settlementOverduePauseAction({
         oldestStuckAgeMs: oldestSettlementAgeMs,
         settlementMaxPendingMs: config.settlementMaxPendingMs,
@@ -8465,6 +8554,36 @@ export const program = Effect.gen(function* () {
         mode: autonomousExecution.mode,
         consecutiveExecutionFailures,
         maxConsecutiveExecutionFailures: config.maxConsecutiveExecutionFailures,
+      })
+    ) {
+      return Effect.gen(function* () {
+        activeSafetyPause = { ...pause, resolvedAt: Date.now() };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+      });
+    }
+    return Effect.void;
+  }
+
+  // A latched `core_data_unavailable` pause must not outlive the outage that
+  // raised it: it has no other resolver, so a single all-pools-failed cycle
+  // (RPC outage, rate-limit ban) used to block ENTER/REBALANCE until an
+  // operator ran `prism resume`. Mode-aware, like the execution-failures
+  // resolver — but evaluated at the cycle TAIL, right after the failure
+  // counter is recomputed, because the resolver needs two facts only the
+  // finished cycle has: the fresh counter and whether the cycle actually
+  // scanned anything. Clearing on an empty scan set would un-pause the agent
+  // during an ongoing outage that produced no pools to fail.
+  function resolveCycleCoreDataPause(poolsScannedThisCycle: number): Effect.Effect<void, never> {
+    const pause = activeSafetyPause;
+    if (
+      autonomousExecution &&
+      pause !== null &&
+      pause.resolvedAt === null &&
+      pause.reason === "core_data_unavailable" &&
+      shouldAutoResolveCoreDataPause({
+        mode: autonomousExecution.mode,
+        consecutiveCoreDataFailures,
+        poolsScannedThisCycle,
       })
     ) {
       return Effect.gen(function* () {
@@ -8694,7 +8813,14 @@ export const program = Effect.gen(function* () {
         consecutiveCoreDataFailures,
         cycle.poolsScanned,
         coreDataFailuresThisCycle,
+        poolsToScan.length,
       );
+      // Resolve BEFORE the arm block so a genuine breach re-arms in the same
+      // pass instead of toggling, and so the resolver judges the counter this
+      // cycle just recomputed. Only core_data_unavailable resolves here: its
+      // evidence (the counter + whether anything was scanned) exists only at
+      // the tail.
+      yield* resolveCycleCoreDataPause(cycle.poolsScanned);
       // Issue #182: quiet-cycle decay BEFORE the arm evaluates — a cycle with
       // no execution failures resets the consecutive counter, so a stale
       // breach from a previous spike can never re-arm the pause in the same
@@ -8704,7 +8830,12 @@ export const program = Effect.gen(function* () {
         consecutiveExecutionFailures,
         executionFailuresThisCycle,
       );
-      if (isSafetyPauseArmed(autonomousExecution, activeSafetyPause)) {
+      // Arm only while no pause is latched: a latched pause must not be
+      // re-armed (that would reset triggeredAt every cycle), and every
+      // resolver above owns clearing its own reason.
+      const canArmSafetyPause =
+        autonomousExecution !== null && !isSafetyPauseArmed(activeSafetyPause);
+      if (canArmSafetyPause) {
         const pauseReason = shouldTriggerSafetyPause({
           dailyDrawdownPct,
           maxDailyDrawdownPct: config.maxDailyDrawdownPct,
@@ -9308,8 +9439,41 @@ export const program = Effect.gen(function* () {
       memory
         .upsert({ category: "warning", content, poolAddress })
         .pipe(Effect.catch(() => Effect.void));
-    const rejectForSafety = (reason: string): Effect.Effect<ReadonlyArray<AgentDecision>> =>
+    /**
+     * Persist `rejected` on this pool's candidate.
+     *
+     * `rejected` was unreachable from the engine: the only producer is a
+     * `hard_safety_failure` scan verdict, and the discovery pass always builds
+     * `{ kind: "safe" }`. So a blacklisted pool's candidate stayed `eligible`
+     * in SQL and kept being counted. The safety screen is the one place that
+     * actually knows, so it owns the verdict.
+     */
+    const rejectCandidatesForPool = (reason: string): Effect.Effect<void, never> =>
       Effect.gen(function* () {
+        for (const candidate of autonomousCandidates.values()) {
+          if (candidate.poolAddress !== poolAddress || candidate.state === "rejected") continue;
+          const rejectedCandidate = transitionCandidate(
+            candidate,
+            {
+              kind: "scan",
+              observedAt: Date.now(),
+              health: { kind: "hard_safety_failure", reason },
+            },
+            {
+              minHealthyScans: config.candidateMinHealthyScans,
+              minObservationMs: config.candidateMinObservationMs,
+            },
+          );
+          autonomousCandidates.set(rejectedCandidate.id, rejectedCandidate);
+          yield* db.saveTokenCandidate(rejectedCandidate).pipe(Effect.catch(() => Effect.void));
+        }
+      });
+    const rejectForSafety = (
+      reason: string,
+      permanent = false,
+    ): Effect.Effect<ReadonlyArray<AgentDecision>> =>
+      Effect.gen(function* () {
+        if (permanent) permanentlyUnsafePools.add(poolAddress);
         logger.warn("Pool rejected by safety screening", { pool: poolAddress, reason });
         yield* audit
           .recordDecision({
@@ -9325,12 +9489,18 @@ export const program = Effect.gen(function* () {
           })
           .pipe(Effect.catch(() => Effect.void));
         yield* recordSafetyWarning(`Safety screening rejected ${poolAddress}: ${reason}`);
+        // Only verdicts that can never be exempted quarantine the candidate:
+        // `rejected` has no outgoing edge, so a freeze-authority or
+        // verification gap (a hold that clears next cycle) must not use it.
+        if (permanent) yield* rejectCandidatesForPool(reason);
         return [];
       });
     return Effect.gen(function* () {
       // 1. Meteora Data API flags: is_blacklisted, freeze_authority_disabled.
       if (datapiStats?.isBlacklisted === true) {
-        return yield* rejectForSafety("Meteora Data API flags pool as blacklisted");
+        // Never exempted by design — the same verdict that skips re-screening
+        // must also quarantine the candidate.
+        return yield* rejectForSafety("Meteora Data API flags pool as blacklisted", true);
       }
       // 2. On-chain mint accounts: mint authority doubles as the documented
       //    deployer fallback for the deployer blacklist.
@@ -9366,7 +9536,8 @@ export const program = Effect.gen(function* () {
       }
 
       const feeReject = yield* checkTransferFeeLegs();
-      if (feeReject) return yield* rejectForSafety(feeReject);
+      // Immutable: the transfer-fee extension cannot be removed from the mint.
+      if (feeReject) return yield* rejectForSafety(feeReject, true);
       // ─── Hot-lane rug precondition — mint authority (market-scan/runner) ──
       // A non-trusted leg with a live mint authority (not renounced) lets the
       // dev mint+dump. Trusted legs (stables + SOL) are exempt.
@@ -10019,35 +10190,7 @@ export const program = Effect.gen(function* () {
     });
   }
 
-  /** Net active-bin drift + realized volatility over the recent-bin ring. */
-  interface PoolDriftMetrics {
-    readonly netDriftBins: number;
-    readonly volatilityStddev: number;
-    readonly volatilityBins: ReadonlyArray<number>;
-    readonly recentBins: ReadonlyArray<number>;
-  }
-  function resolvePoolDriftMetrics(
-    binHistory: ReadonlyMap<string, ReadonlyArray<number>>,
-    poolAddress: string,
-    volatilityLookbackSnapshots: number,
-  ): PoolDriftMetrics {
-    const recentBins = binHistory.get(poolAddress) ?? [];
-    // Net active-bin drift over the recent-bin ring — the momentum signal
-    // shared by the entry-shape resolution, the drift gate, and runner
-    // admission. Null when the pool has no bin history (cold start): runner
-    // admission fails OPEN on unknown drift (it cannot prove a decline).
-    const netDriftBins =
-      recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
-    const lookback = Math.max(2, volatilityLookbackSnapshots);
-    const volatilityBins =
-      recentBins.length > lookback ? recentBins.slice(recentBins.length - lookback) : recentBins;
-    return {
-      netDriftBins,
-      volatilityStddev: computeBinVolatilityStddev(volatilityBins),
-      volatilityBins,
-      recentBins,
-    };
-  }
+  // Pool drift metrics are pure fact derivation — see engine/cycle/facts.ts.
   /** Deposit distribution for entries: configured shape as-is; auto picks from volatility regime. */
   function resolveEntryStrategySpec(
     entryStrategyType: EntryStrategyType,
@@ -10233,11 +10376,12 @@ export const program = Effect.gen(function* () {
       const isMarketRunner = entryGates.isMarketRunner;
       const w15Signals = entryGates.w15Signals;
 
-      // Decision rules
-      const feeIlRatio = metrics.feeIlRatio;
-      const volumeAuth = metrics.volumeAuthenticity;
-      const tvlVelocity = metrics.tvlVelocity;
-      const binUtilization = metrics.binUtilization;
+      // Decision rules read the assembled pool facts, not raw metric fields.
+      const poolFacts = entryGates.poolFacts;
+      const feeIlRatio = poolFacts.feeIlRatio;
+      const volumeAuth = poolFacts.volumeAuthenticity;
+      const tvlVelocity = poolFacts.tvlVelocity;
+      const binUtilization = poolFacts.binUtilization;
 
       /** IL-dominance signal (null = gate does not apply this cycle). */
       interface IlDominanceSignal {
@@ -10479,36 +10623,24 @@ export const program = Effect.gen(function* () {
       // bleed), entry legs are known, and unrealized IL exceeds cumulative
       // fees by the configured factor and the USD floor.
       function computeIlDominance(pos: PositionRecord): IlDominanceSignal | null {
+        if (config.ilProtectionEnabled !== true || pos.outOfRangeSince === null) return null;
+        // currentValueUsd is the heuristic estimatePositionValue mark refreshed
+        // in the per-position value loop above, not an oracle price; the HODL
+        // benchmark is the real on-chain entry legs.
+        const hodlValueUsd = hodlBenchmarkUsd(pos, pool.currentPrice);
+        if (hodlValueUsd === null) return null;
+        const facts = assemblePositionFacts(pos, hodlValueUsd);
+        const ilUsd = hodlValueUsd - facts.currentValueUsd;
+        const feesClaimedUsd = facts.cumulativeFeesClaimedUsd;
         if (
-          config.ilProtectionEnabled === true &&
-          pos.outOfRangeSince !== null &&
-          pos.entryAmountXUsd != null &&
-          pos.entryAmountYUsd != null &&
-          pos.entryPriceUsd != null
+          isIlDominant(
+            ilUsd,
+            feesClaimedUsd,
+            config.ilDominanceExitFactor,
+            config.ilDominanceMinUsd,
+          )
         ) {
-          // currentValueUsd is the heuristic estimatePositionValue mark
-          // refreshed in the per-position value loop above, not an oracle
-          // price; the HODL benchmark is the real on-chain entry legs.
-          const hodlValueUsd = computeHodlValueUsd(
-            pos.entryAmountXUsd,
-            pos.entryAmountYUsd,
-            pos.entryPriceUsd,
-            pool.currentPrice,
-          );
-          if (hodlValueUsd !== null) {
-            const ilUsd = hodlValueUsd - pos.currentValueUsd;
-            const feesClaimedUsd = pos.cumulativeFeesClaimedUsd;
-            if (
-              isIlDominant(
-                ilUsd,
-                feesClaimedUsd,
-                config.ilDominanceExitFactor,
-                config.ilDominanceMinUsd,
-              )
-            ) {
-              return { ilUsd, hodlValueUsd, feesClaimedUsd };
-            }
-          }
+          return { ilUsd, hodlValueUsd, feesClaimedUsd };
         }
         return null;
       }
@@ -11480,7 +11612,10 @@ export const program = Effect.gen(function* () {
               poolAddress,
               cooldownUntil,
               reason: `Low yield exit`,
-              consecutiveOorExits: 0,
+              // setPoolCooldown is INSERT OR REPLACE: writing 0 here wiped a
+              // pool's OOR history, so one low-yield exit between OOR exits
+              // reset REPEAT_OOR_COOLDOWN_MS back to the base duration.
+              consecutiveOorExits: existingOorCount,
             };
           }
 
@@ -12424,7 +12559,7 @@ export const program = Effect.gen(function* () {
             action: "ENTER",
             poolAddress,
             confidence: 0.75,
-            reasoning: `Fallen-angel: ${faSignal.assetMint} down ${(faSignal.drawdownPct * 100).toFixed(0)}% from ATH, RugCheck-clean, TVL $${pool.tvlUsd.toFixed(0)}`,
+            reasoning: `[fallen-angel-enter] ${faSignal.assetMint} down ${(faSignal.drawdownPct * 100).toFixed(0)}% from ATH, RugCheck-clean, TVL $${pool.tvlUsd.toFixed(0)}`,
             positionSizeUsd: faAllocation.adjustedDepositUsd,
             positionMode: "fallen-angel",
             tpLadderJson: serializeTpLadder(faLadder.ladder) ?? undefined,
@@ -13076,7 +13211,7 @@ export const program = Effect.gen(function* () {
                   action: "ENTER",
                   poolAddress,
                   confidence: Math.min(0.5 + feeIlRatio * 0.05, 0.85),
-                  reasoning: `Launch: launch-gated hot pool — time-boxed entry, $${launchAllocation.adjustedDepositUsd.toFixed(0)}`,
+                  reasoning: `[launch-enter] launch-gated hot pool — time-boxed entry, $${launchAllocation.adjustedDepositUsd.toFixed(0)}`,
                   positionSizeUsd: launchAllocation.adjustedDepositUsd,
                   positionMode: "launch",
                 });
@@ -13363,8 +13498,8 @@ export const program = Effect.gen(function* () {
                   config.entryMomentumConfBoost,
                 ),
                 reasoning: enterSize.halved
-                  ? `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)} [jev-stress-halve stress=${enterSize.stress.toFixed(2)}]`
-                  : `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)}`,
+                  ? `[normal-enter] Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)} [jev-stress-halve stress=${enterSize.stress.toFixed(2)}]`
+                  : `[normal-enter] Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)}`,
                 positionSizeUsd,
                 ...resolveTpLadderSpread(tpLadder),
               });
@@ -14365,6 +14500,26 @@ export const program = Effect.gen(function* () {
               const budgetHuman = entrySolBudgetKnown
                 ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
                 : "unknown";
+              // Minimal-capital operation: a qualifying entry is not skipped just
+              // because the wallet is short — shrink it to fit the free SOL (never
+              // below the $10 floor). Smaller sizes only relax the downstream risk
+              // caps; the exact estimate is re-checked after the shrink.
+              const resized = entrySolBudgetKnown
+                ? resizeEnterToFreeSol({
+                    desiredSizeUsd: entrySizeUsd,
+                    freeSolLamports: entrySolBudgetLamports,
+                    solPriceUsd: entrySolPriceUsd,
+                    poolHasSolLeg: hasNativeSolLeg(pool),
+                  })
+                : null;
+              if (resized !== null) {
+                decision.positionSizeUsd = resized.sizeUsd;
+                entrySolBudgetLamports -= resized.lamports;
+                console.info(
+                  `[wallet-reserve] resized ${poolAddress} $${entrySizeUsd.toFixed(2)} -> $${resized.sizeUsd.toFixed(2)} to fit free SOL ${budgetHuman}`,
+                );
+                return null;
+              }
               const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
               const reason = `[wallet-reserve] free SOL ${budgetHuman} < needed ${neededHuman} — entry skipped (capacity-limited, not an error)`;
               yield* audit
@@ -15220,6 +15375,7 @@ export const program = Effect.gen(function* () {
             halt: null,
             safetyRejected,
             metrics,
+            poolFacts: assemblePoolFacts({ pool, metrics }),
             quality,
             pool,
             binArray,

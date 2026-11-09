@@ -34,7 +34,7 @@ export default defineConfig({
   },
   // See tsdown.cli.config.ts: release bundles ship without node_modules and
   // bare imports resolve from bun's global cache — which broke v0.1.9 (issue
-  // #179). Bundle every runtime dependency; @xenova/transformers stays
+  // #179). Bundle every runtime dependency; @huggingface/transformers stays
   // external (optional ONNX backend, import failure falls back to hash
   // vectors).
   deps: {
@@ -44,7 +44,6 @@ export default defineConfig({
       "sqlite-vec",
       "effect",
       "commander",
-      "chalk",
       "dotenv",
       "@clack/prompts",
       "semver",

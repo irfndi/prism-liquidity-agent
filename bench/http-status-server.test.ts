@@ -857,6 +857,64 @@ describe("HttpStatusServer", () => {
     }
   });
 
+  it("refuses to approve a stale proposal at the HTTP boundary", async () => {
+    // Given a proposal whose staleness window has long passed (the operator
+    // approved evidence they can no longer see), plus one that is still fresh.
+    const port = 18_792;
+    const approvedIds: string[] = [];
+    const now = Date.now();
+    const proposal = (id: string, proposedAt: number) => ({
+      proposalId: id,
+      action: "HOLD" as const,
+      poolAddress: "PoolA",
+      confidence: 0.8,
+      reasoning: "test",
+      proposedAt,
+      expiresAt: proposedAt + 300_000,
+      source: "http-queue" as const,
+      status: "pending" as const,
+    });
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "proposal-token",
+        agentApprovalToken: "secret-token",
+      }),
+      {
+        ...mockAgentState(
+          baseSnapshot({
+            pendingProposals: [proposal("stale-1", now - 3_600_000), proposal("fresh-1", now)],
+          }),
+        ),
+        approveProposal: (proposalId: string) =>
+          Effect.sync(() => {
+            approvedIds.push(proposalId);
+          }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ proposalIds: ["stale-1", "fresh-1"] }),
+      });
+
+      // Then the batch is refused whole: nothing is approved, so a stale entry
+      // cannot ride along with a fresh one.
+      expect(response.status).toBe(409);
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
+      const body = (await response.json()) as { error: string; stale: string[] };
+      expect(body.stale).toEqual(["stale-1"]);
+      expect(approvedIds).toEqual([]);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
   it("approves queued proposals via /approve", async () => {
     const port = 18_791;
     const approvedIds: string[] = [];

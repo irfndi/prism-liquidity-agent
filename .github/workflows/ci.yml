@@ -19,7 +19,7 @@ permissions:
 # linker and shared global store. (Cloudflare R2 is deprecated for
 # distribution — account billing; releases publish to GitHub.)
 env:
-  BUN_VERSION: 1.4.2
+  BUN_VERSION: 1.4.4
 
 jobs:
   build:
