@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeCooldownForExit, type ExitCooldownConfig } from "../engine/cooldown.js";
+import {
+  computeCooldownForExit,
+  nextOorExitCount,
+  type ExitCooldownConfig,
+} from "../engine/cooldown.js";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -196,5 +200,53 @@ describe("cooldown duration math", () => {
         previous = duration;
       }
     });
+  });
+});
+
+// The persisted counter is what carries OOR escalation across exit kinds.
+// setPoolCooldown is an INSERT OR REPLACE, so a writer that resets it silently
+// demotes a pool from REPEAT_OOR_COOLDOWN_MS back to the base duration after
+// one low-yield exit in between.
+describe("OOR escalation counter persists across exit kinds", () => {
+  const escalatedConfig: ExitCooldownConfig = {
+    ...config,
+    maxOorCooldownExits: 3,
+  };
+
+  it("advances only on an OOR exit", () => {
+    expect(nextOorExitCount("oor", 0)).toBe(1);
+    expect(nextOorExitCount("oor", 2)).toBe(3);
+  });
+
+  it("preserves the count for a low-yield exit", () => {
+    // setPoolCooldown is INSERT OR REPLACE, so writing 0 here is what wiped the
+    // escalation; the pure decision now has to return the existing value.
+    expect(nextOorExitCount("low-yield", 2)).toBe(2);
+    expect(nextOorExitCount("low-yield", 0)).toBe(0);
+  });
+
+  it("keeps the escalated duration for the OOR exit after a low-yield one", () => {
+    // Given two OOR exits, then a low-yield exit that must carry the count.
+    const afterLowYield = nextOorExitCount("low-yield", nextOorExitCount("oor", 1));
+    expect(afterLowYield).toBe(2);
+
+    // When the next OOR exit computes its duration from the preserved count.
+    const duration = computeCooldownForExit({
+      trigger: "oor",
+      consecutiveOorExits: afterLowYield,
+      config: escalatedConfig,
+      feeDensityPerDay: null,
+    });
+
+    // Then it escalates. Resetting the counter (the bug) demotes it to base.
+    expect(duration).toBe(escalatedConfig.repeatOorCooldownMs);
+    expect(
+      computeCooldownForExit({
+        trigger: "oor",
+        consecutiveOorExits: 0,
+        config: escalatedConfig,
+        feeDensityPerDay: null,
+      }),
+    ).toBe(escalatedConfig.oorCooldownMs);
   });
 });

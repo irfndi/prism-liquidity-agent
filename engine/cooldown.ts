@@ -91,3 +91,15 @@ export function computeCooldownForExit(request: ExitCooldownRequest): number {
       return computeLowYieldCooldownMs(config, feeDensityPerDay);
   }
 }
+
+/**
+ * The `consecutive_oor_exits` value an exit must PERSIST.
+ *
+ * Only an OOR exit advances the escalation counter. Every other exit carries
+ * the existing value through: `setPoolCooldown` is an INSERT OR REPLACE, so a
+ * writer that passes 0 silently wipes the pool's OOR history and demotes it
+ * from `repeatOorCooldownMs` back to the base duration.
+ */
+export function nextOorExitCount(trigger: ExitCooldownTrigger, existing: number): number {
+  return trigger === "oor" ? existing + 1 : existing;
+}

@@ -59,7 +59,9 @@ export function shouldTriggerSafetyPause(
   if (input.maxDailyDrawdownPct > 0 && input.dailyDrawdownPct >= input.maxDailyDrawdownPct) {
     return "daily_drawdown";
   }
-  if (input.consecutiveCoreDataFailures >= 2) return "core_data_unavailable";
+  if (input.consecutiveCoreDataFailures >= CORE_DATA_PAUSE_FAILURE_THRESHOLD) {
+    return "core_data_unavailable";
+  }
   if (
     input.maxConsecutiveExecutionFailures > 0 &&
     input.consecutiveExecutionFailures >= input.maxConsecutiveExecutionFailures
@@ -78,6 +80,56 @@ export interface DailyDrawdownAutoResolveInput {
   readonly maxDailyDrawdownPct: number;
   readonly dayRolledOver: boolean;
 }
+
+export interface CoreDataAutoResolveInput {
+  readonly mode: AutonomousTokenMode;
+  readonly consecutiveCoreDataFailures: number;
+  /**
+   * Pools scanned by the cycle whose counter is being evaluated. Zero means
+   * the cycle produced NO data either way — a recovery is unproven, so a
+   * latched pause must stay latched rather than clear on an empty scan set.
+   */
+  readonly poolsScannedThisCycle: number;
+}
+
+/**
+ * Auto-resolution for a latched `core_data_unavailable` safety pause.
+ *
+ * The trigger (`shouldTriggerSafetyPause`) is session-local and resets after
+ * any cycle where not every scanned pool failed, but the pause it armed was a
+ * one-way latch with no resolver — so one all-pools-failed cycle (an RPC
+ * outage, a rate-limit ban) blocked ENTER/REBALANCE until an operator ran
+ * `prism resume`, exactly the failure mode issue #182 fixed for
+ * `execution_failures`. Mirrors the same autonomy contract:
+ *
+ * - `shadow` — informational only, always auto-resolve.
+ * - `canary` / `live` — auto-resolve once the counter drops below the trigger
+ *   threshold (two consecutive all-pools-failed cycles) AND the cycle actually
+ *   scanned pools, so an empty scan set ("no pools configured", or discovery
+ *   returning nothing during an outage) cannot clear the latch without
+ *   evidence that data came back. A fresh process starts at 0, so a restart
+ *   alone clears it; the cycle-tail arm block re-arms on a real breach.
+ *
+ * Returns true when the caller should clear the active pause (`resolvedAt`).
+ */
+export function shouldAutoResolveCoreDataPause(input: CoreDataAutoResolveInput): boolean {
+  switch (input.mode) {
+    case "shadow":
+      return true;
+    case "canary":
+    case "live":
+    case "off":
+      // `=== 0`, not `< threshold`: a counter of 1 means the previous cycle
+      // still failed every pool, so the data has not come back yet and the
+      // latch must hold. Only a fully clean cycle proves recovery.
+      return input.consecutiveCoreDataFailures === 0 && input.poolsScannedThisCycle > 0;
+    default:
+      throw new Error(`Unhandled autonomous token mode: ${String(input.mode)}`);
+  }
+}
+
+/** Consecutive all-pools-failed cycles that arm `core_data_unavailable`. */
+export const CORE_DATA_PAUSE_FAILURE_THRESHOLD = 2;
 
 export interface ExecutionFailuresAutoResolveInput {
   readonly mode: AutonomousTokenMode;
@@ -202,15 +254,40 @@ export function nextSettlementRetryAt(now: number, attempts: number): number {
 export function oldestActiveSettlementAgeMs(
   jobs: ReadonlyArray<SettlementJobRecord>,
   now: number,
+  settlementMaxPendingMs?: number,
 ): number {
   return jobs
-    .filter(
-      (job) =>
-        job.status !== "confirmed" &&
-        job.status !== "terminal" &&
-        (job.nextRetryAt === null || job.nextRetryAt <= now),
-    )
+    .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
+    .filter((job) => isStuckSettlementJob(job, now, settlementMaxPendingMs))
     .reduce((oldest, job) => Math.max(oldest, now - job.createdAt), 0);
+}
+
+/**
+ * True when a job is genuinely stuck (worth an operator signal).
+ *
+ * A FUTURE `nextRetryAt` normally means "progressing per policy, do not
+ * halt trading" (issue #196: a rate-limited 429 backs off). But a transient
+ * failure never terminalizes (`retryableJob`), so a permanent 429 keeps
+ * scheduling retries forever and the job is past its own `expires_at` — it
+ * can no longer legitimately settle, yet it still blocks nothing and reports
+ * nothing. Counting it as stuck is what restores the `settlement_overdue`
+ * signal; the position it belongs to is already closed with a NULL realized
+ * PnL, which is exactly the state an operator must see.
+ *
+ * A job still inside its window with a scheduled retry stays excused, so the
+ * #196 backoff case is unaffected.
+ */
+function isStuckSettlementJob(
+  job: SettlementJobRecord,
+  now: number,
+  settlementMaxPendingMs: number | undefined,
+): boolean {
+  const retryExcused = job.nextRetryAt === null || job.nextRetryAt <= now;
+  if (retryExcused) return true;
+  // Explicit window wins (lets the caller drop the `expires_at` proxy);
+  // otherwise `expires_at` is the same bound the job already carries.
+  const windowMs = settlementMaxPendingMs ?? Math.max(0, job.expiresAt - job.createdAt);
+  return now - job.createdAt > windowMs;
 }
 
 export type SettlementOverduePauseAction =
@@ -1029,6 +1106,12 @@ function nextOrphanSweepJob(
       amountAtomic: holding.amountAtomic.toString(),
       nextRetryAt: now,
       expiresAt: now + settlementMaxPendingMs,
+      // A revival is a new attempt generation with a fresh window. Keeping the
+      // ORIGINAL createdAt would make the overdue check (`now - createdAt`)
+      // report a brand-new job as hours stale and arm settlement_overdue for
+      // work that just started. `attempts` still carries over, so backoff keeps
+      // escalating across generations.
+      createdAt: now,
       error: null,
       updatedAt: now,
     };
@@ -1074,6 +1157,39 @@ function nextOrphanSweepJob(
  * position legs are only fetched when candidate mints actually exist, and
  * holdings come from the wallet balance's existing 30s cached snapshot.
  */
+/**
+ * Persists swept jobs and returns only the ones the database accepted.
+ *
+ * A job whose write failed must NOT be processed: the sale would move tokens
+ * with no durable row, and the next sweep can only re-enqueue what the wallet
+ * still holds — so a sold balance becomes an unaudited transfer that survives
+ * only in chain history. Skipping leaves the balance untouched for a clean
+ * retry on the next cycle.
+ */
+export function persistSweptSettlementJobs(
+  db: Pick<DbApi, "saveSettlementJob">,
+  jobs: ReadonlyArray<SettlementJobRecord>,
+): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {
+  return Effect.gen(function* () {
+    const persisted: SettlementJobRecord[] = [];
+    for (const job of jobs) {
+      const saved = yield* db.saveSettlementJob(job).pipe(
+        Effect.as(true),
+        Effect.catch(() => Effect.succeed(false)),
+      );
+      if (saved) {
+        persisted.push(job);
+        continue;
+      }
+      logger.warn("Settlement job not persisted — not processing, sweep retries next cycle", {
+        jobId: job.id,
+        mint: job.tokenMint,
+      });
+    }
+    return persisted;
+  });
+}
+
 export function sweepOrphanSettlements(
   input: OrphanSettlementSweepInput,
 ): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {

@@ -239,7 +239,7 @@ import {
   ProposalCircuitBreaker,
   type ProposalBackoff,
 } from "./proposal-backoff.js";
-import { computeCooldownForExit } from "./cooldown.js";
+import { computeCooldownForExit, nextOorExitCount } from "./cooldown.js";
 import {
   loadDailyEquityBaseline,
   oldestActiveSettlementAgeMs,
@@ -248,10 +248,13 @@ import {
   safetyPauseBlockReason,
   settlementOverduePauseAction,
   shouldAutoResolveDailyDrawdownPause,
+  shouldAutoResolveCoreDataPause,
+  CORE_DATA_PAUSE_FAILURE_THRESHOLD,
   shouldAutoResolveExecutionFailuresPause,
   decayExecutionFailureCounter,
   shouldTriggerSafetyPause,
   sweepOrphanSettlements,
+  persistSweptSettlementJobs,
 } from "./autonomous-runtime.js";
 import { routeProbeAmountAtomic } from "./route-probe.js";
 import {
@@ -370,9 +373,9 @@ export type TokenPriceMap = Record<string, number>;
  * yields `undefined`, which `prices[mint] != null` checks treat as unknown). */
 const EMPTY_TOKEN_PRICES: TokenPriceMap = Object.create(null);
 
-export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
-  return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
-}
+import { isProposalStale } from "./proposal-schema.js";
+
+export { isProposalStale };
 
 export function shouldHoldForSupervisedApproval(
   agentiveMode: boolean,
@@ -4039,21 +4042,38 @@ function shouldRunIdleRedeploy(
 }
 
 /** Consecutive core-data-failure counter (full-cycle failure increments). */
+/**
+ * Consecutive cycles in which core data was unavailable.
+ *
+ * Two shapes count as unavailable: every scanned pool failed, and a cycle that
+ * was EXPECTED to scan pools but scanned none. The second shape is the one
+ * that used to read as healthy — a dead RPC that makes discovery return
+ * nothing produces `poolsScanned === 0`, and `failuresThisCycle >= poolsScanned`
+ * is `0 >= 0`, so the old formula reset the counter mid-outage and the breaker
+ * saw a perfectly healthy agent. An empty scan set is only legitimate when
+ * nothing was expected (`expectedPools === 0`).
+ */
 function updateCoreDataFailureCounter(
   consecutive: number,
   poolsScanned: number,
   failuresThisCycle: number,
+  expectedPools: number,
 ): number {
-  return poolsScanned > 0 && failuresThisCycle >= poolsScanned ? consecutive + 1 : 0;
+  if (poolsScanned === 0) return expectedPools > 0 ? consecutive + 1 : 0;
+  return failuresThisCycle >= poolsScanned ? consecutive + 1 : 0;
 }
 
+export { updateCoreDataFailureCounter };
+
 /** Safety-pause armed check (autonomous with an unresolved pause). */
+/** A safety pause is latched (armed) and unresolved. */
 function isSafetyPauseArmed(
-  autonomousExecution: AutonomousExecutionContext | null,
   activeSafetyPause: { readonly resolvedAt: number | null } | null,
-): autonomousExecution is AutonomousExecutionContext {
-  return autonomousExecution !== null && activeSafetyPause?.resolvedAt !== null;
+): boolean {
+  return activeSafetyPause !== null && activeSafetyPause.resolvedAt === null;
 }
+
+export { isSafetyPauseArmed };
 
 /** Aggregate unrealized PnL across tracked positions (PnL formula parity). */
 function computeCycleUnrealizedPnl(trackedPositions: ReadonlyMap<string, PositionRecord>): number {
@@ -6310,6 +6330,57 @@ export const program = Effect.gen(function* () {
   >();
   const autonomousCandidatePoolAddresses = new Set<string>();
 
+  /**
+   * Persist `rejected` on this pool's candidate for a safety verdict that no
+   * configuration can rehabilitate.
+   *
+   * `rejected` was unreachable from the engine: the only producer is a
+   * `hard_safety_failure` scan verdict, and the discovery pass always builds
+   * `{ kind: "safe" }`. A blacklisted pool's candidate therefore stayed
+   * `eligible` in SQL and kept being counted every cycle.
+   *
+   * Only the third-party Data-API blacklist uses this, because `rejected` has
+   * no outgoing edge: the operator-configurable gates (transfer-fee legs via
+   * ALLOW_TRANSFER_FEE_TOKENS, the operator-maintained token/deployer
+   * blacklist, freeze-authority adjudication) must stay re-evaluable instead.
+   */
+  function rejectCandidatesForPool(
+    poolAddress: string,
+    reason: string,
+  ): Effect.Effect<void, never> {
+    return Effect.gen(function* () {
+      for (const candidate of autonomousCandidates.values()) {
+        if (candidate.poolAddress !== poolAddress || candidate.state === "rejected") continue;
+        const rejectedCandidate = transitionCandidate(
+          candidate,
+          {
+            kind: "scan",
+            observedAt: Date.now(),
+            health: { kind: "hard_safety_failure", reason },
+          },
+          {
+            minHealthyScans: config.candidateMinHealthyScans,
+            minObservationMs: config.candidateMinObservationMs,
+          },
+        );
+        autonomousCandidates.set(rejectedCandidate.id, rejectedCandidate);
+        // catchCause, not catch: saveTokenCandidate wraps Effect.sync, so a
+        // SQLite throw surfaces as a DEFECT and would kill the scheduler fiber.
+        // The in-memory rejection stands regardless — the row is advisory.
+        yield* db.saveTokenCandidate(rejectedCandidate).pipe(
+          Effect.catchCause((cause) =>
+            Effect.sync(() =>
+              logger.warn("Rejected-candidate persistence failed", {
+                candidate: rejectedCandidate.id,
+                cause: String(cause),
+              }),
+            ),
+          ),
+        );
+      }
+    });
+  }
+
   yield* loadPersistedCandidates(
     config,
     db,
@@ -6505,30 +6576,55 @@ export const program = Effect.gen(function* () {
               }),
             );
       const now = Date.now();
-      function settleCoolingCandidates(now: number): Effect.Effect<void, never> {
+      /**
+       * The one state advance a candidate is owed this cycle, or null.
+       *
+       * `cooling_down` returns to discovery once its cooldown lapsed. `entered`
+       * returns to discovery when its pool holds NO tracked position — the
+       * close may have happened through reconcile, an empty reap or a paper
+       * exit, none of which pass through the EXIT tail that used to be the only
+       * `cooldown_started` writer. Without this branch a candidate is "entered"
+       * forever and its token is never re-admitted for the life of the row.
+       */
+      function candidateSettlementEvent(
+        candidate: TokenCandidateRecord,
+        poolsWithPositions: ReadonlySet<string>,
+        observedAt: number,
+      ): Parameters<typeof transitionCandidate>[1] | null {
+        if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
+          return { kind: "cooldown_elapsed", occurredAt: observedAt };
+        }
+        if (candidate.state === "entered" && !poolsWithPositions.has(candidate.poolAddress)) {
+          // Same re-entry window the decision tail arms on a normal exit, so an
+          // externally-closed position cannot re-qualify immediately.
+          return {
+            kind: "entry_closed",
+            occurredAt: observedAt,
+            cooldownUntil: observedAt + (config.minReentryCooldownMs ?? 0),
+          };
+        }
+        return null;
+      }
+
+      function settleCandidateStates(observedAt: number): Effect.Effect<void, never> {
         return Effect.gen(function* () {
+          const poolsWithPositions = new Set<string>();
+          for (const pos of trackedPositions.values()) poolsWithPositions.add(pos.poolAddress);
           for (const candidate of autonomousCandidates.values()) {
-            if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
-              const advancedCandidate = transitionCandidate(
-                candidate,
-                { kind: "cooldown_elapsed", occurredAt: now },
-                {
-                  minHealthyScans: config.candidateMinHealthyScans,
-                  minObservationMs: config.candidateMinObservationMs,
-                },
-              );
-              if (advancedCandidate !== candidate) {
-                autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
-                yield* db
-                  .saveTokenCandidate(advancedCandidate)
-                  .pipe(Effect.catch(() => Effect.void));
-              }
-            }
+            const event = candidateSettlementEvent(candidate, poolsWithPositions, observedAt);
+            if (event === null) continue;
+            const advancedCandidate = transitionCandidate(candidate, event, {
+              minHealthyScans: config.candidateMinHealthyScans,
+              minObservationMs: config.candidateMinObservationMs,
+            });
+            if (advancedCandidate === candidate) continue;
+            autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
+            yield* db.saveTokenCandidate(advancedCandidate).pipe(Effect.catch(() => Effect.void));
           }
         });
       }
 
-      yield* settleCoolingCandidates(now);
+      yield* settleCandidateStates(now);
       const candidatePools = screened
         .filter(
           (pool) =>
@@ -8402,10 +8498,8 @@ export const program = Effect.gen(function* () {
           settlementDustUsd: autonomousExecution.settlementDustUsd,
           now: settlementNow,
         });
-        for (const job of orphanJobs) {
-          yield* db.saveSettlementJob(job).pipe(Effect.catch(() => Effect.void));
-        }
-        settlementJobs.push(...orphanJobs);
+        const persistedOrphanJobs = yield* persistSweptSettlementJobs(db, orphanJobs);
+        settlementJobs.push(...persistedOrphanJobs);
       }
       const processedJobs = yield* processSettlementJobs({
         adapter,
@@ -8420,7 +8514,11 @@ export const program = Effect.gen(function* () {
       // Issue #196 (clock skew): evaluate the overdue age against the SAME
       // clock the retry scheduling used (settlementNow) — a retry stamped
       // this cycle must never read as already-past against a fresher clock.
-      const oldestSettlementAgeMs = oldestActiveSettlementAgeMs(processedJobs, settlementNow);
+      const oldestSettlementAgeMs = oldestActiveSettlementAgeMs(
+        processedJobs,
+        settlementNow,
+        config.settlementMaxPendingMs,
+      );
       const pauseAction = settlementOverduePauseAction({
         oldestStuckAgeMs: oldestSettlementAgeMs,
         settlementMaxPendingMs: config.settlementMaxPendingMs,
@@ -8473,6 +8571,84 @@ export const program = Effect.gen(function* () {
       });
     }
     return Effect.void;
+  }
+
+  // A latched `core_data_unavailable` pause must not outlive the outage that
+  // raised it: it has no other resolver, so a single all-pools-failed cycle
+  // (RPC outage, rate-limit ban) used to block ENTER/REBALANCE until an
+  // operator ran `prism resume`. Mode-aware, like the execution-failures
+  // resolver — but evaluated at the cycle TAIL, right after the failure
+  // counter is recomputed, because the resolver needs two facts only the
+  // finished cycle has: the fresh counter and whether the cycle actually
+  // scanned anything. Clearing on an empty scan set would un-pause the agent
+  // during an ongoing outage that produced no pools to fail.
+  function resolveCycleCoreDataPause(poolsScannedThisCycle: number): Effect.Effect<void, never> {
+    const pause = activeSafetyPause;
+    if (
+      autonomousExecution &&
+      pause !== null &&
+      pause.resolvedAt === null &&
+      pause.reason === "core_data_unavailable" &&
+      shouldAutoResolveCoreDataPause({
+        mode: autonomousExecution.mode,
+        consecutiveCoreDataFailures,
+        poolsScannedThisCycle,
+      })
+    ) {
+      return Effect.gen(function* () {
+        activeSafetyPause = { ...pause, resolvedAt: Date.now() };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+      });
+    }
+    return Effect.void;
+  }
+
+  /** True when the engine is configured to source pools from somewhere. */
+  function expectsPoolsToScan(): boolean {
+    return (
+      config.watchlistPools.length > 0 ||
+      config.marketScanEnabled === true ||
+      config.enablePoolDiscovery === true ||
+      config.autonomousTokenMode !== "off"
+    );
+  }
+
+  /**
+   * Core-data accounting for one cycle: advance the consecutive-failure
+   * counter, then resolve or arm the `core_data_unavailable` pause.
+   *
+   * Called from BOTH cycle paths. A cycle that scans nothing returns before
+   * `finalizeScanCycle`, so the counter was never advanced for the one outage
+   * shape it exists to catch — discovery returning no pools at all. The pause
+   * it arms blocks only ENTER/REBALANCE; EXIT stays free.
+   */
+  function accountCoreDataAvailability(
+    poolsScanned: number,
+    expectedPools: number,
+  ): Effect.Effect<void, never> {
+    return Effect.gen(function* () {
+      consecutiveCoreDataFailures = updateCoreDataFailureCounter(
+        consecutiveCoreDataFailures,
+        poolsScanned,
+        coreDataFailuresThisCycle,
+        expectedPools,
+      );
+      yield* resolveCycleCoreDataPause(poolsScanned);
+      if (
+        autonomousExecution &&
+        !isSafetyPauseArmed(activeSafetyPause) &&
+        consecutiveCoreDataFailures >= CORE_DATA_PAUSE_FAILURE_THRESHOLD
+      ) {
+        activeSafetyPause = {
+          walletAddress: autonomousExecution.walletAddress,
+          agentInstanceId: autonomousExecution.agentInstanceId,
+          reason: "core_data_unavailable",
+          triggeredAt: Date.now(),
+          resolvedAt: null,
+        };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+      }
+    });
   }
 
   // Single chain reconciliation of the wallet value for this cycle. Read
@@ -8690,11 +8866,7 @@ export const program = Effect.gen(function* () {
       ) {
         yield* runIdleRedeployPass(idleRedeployCandidates, cycle, executedExitPools);
       }
-      consecutiveCoreDataFailures = updateCoreDataFailureCounter(
-        consecutiveCoreDataFailures,
-        cycle.poolsScanned,
-        coreDataFailuresThisCycle,
-      );
+      yield* accountCoreDataAvailability(cycle.poolsScanned, poolsToScan.length);
       // Issue #182: quiet-cycle decay BEFORE the arm evaluates — a cycle with
       // no execution failures resets the consecutive counter, so a stale
       // breach from a previous spike can never re-arm the pause in the same
@@ -8704,7 +8876,12 @@ export const program = Effect.gen(function* () {
         consecutiveExecutionFailures,
         executionFailuresThisCycle,
       );
-      if (isSafetyPauseArmed(autonomousExecution, activeSafetyPause)) {
+      // Arm only while no pause is latched: a latched pause must not be
+      // re-armed (that would reset triggeredAt every cycle), and every
+      // resolver above owns clearing its own reason.
+      const canArmSafetyPause =
+        autonomousExecution !== null && !isSafetyPauseArmed(activeSafetyPause);
+      if (canArmSafetyPause) {
         const pauseReason = shouldTriggerSafetyPause({
           dailyDrawdownPct,
           maxDailyDrawdownPct: config.maxDailyDrawdownPct,
@@ -8819,6 +8996,10 @@ export const program = Effect.gen(function* () {
           consecutiveExecutionFailures,
           executionFailuresThisCycle,
         );
+        // The one path where an expected-but-empty scan set is observable:
+        // this return skips finalizeScanCycle, so without this the
+        // core_data_unavailable breaker could never see a discovery outage.
+        yield* accountCoreDataAvailability(0, expectsPoolsToScan() ? 1 : 0);
         cycle.completedAt = Date.now();
         return;
       }
@@ -9330,6 +9511,10 @@ export const program = Effect.gen(function* () {
     return Effect.gen(function* () {
       // 1. Meteora Data API flags: is_blacklisted, freeze_authority_disabled.
       if (datapiStats?.isBlacklisted === true) {
+        // The only verdict quarantined on the candidate: a third-party
+        // blacklist that is never exempted by any config flag, so there is no
+        // operator action that could legitimately rehabilitate it.
+        yield* rejectCandidatesForPool(poolAddress, "Meteora Data API flags pool as blacklisted");
         return yield* rejectForSafety("Meteora Data API flags pool as blacklisted");
       }
       // 2. On-chain mint accounts: mint authority doubles as the documented
@@ -9366,7 +9551,12 @@ export const program = Effect.gen(function* () {
       }
 
       const feeReject = yield* checkTransferFeeLegs();
-      if (feeReject) return yield* rejectForSafety(feeReject);
+      if (feeReject) {
+        // NOT a candidate quarantine: whether a transfer-fee leg is allowed is
+        // config-dependent (ALLOW_TRANSFER_FEE_TOKENS), so the verdict must stay
+        // re-evaluable. `rejected` has no outgoing edge.
+        return yield* rejectForSafety(feeReject);
+      }
       // ─── Hot-lane rug precondition — mint authority (market-scan/runner) ──
       // A non-trusted leg with a live mint authority (not renounced) lets the
       // dev mint+dump. Trusted legs (stables + SOL) are exempt.
@@ -9425,6 +9615,9 @@ export const program = Effect.gen(function* () {
           }),
         );
       if (blacklistRejection !== null) {
+        // NOT a candidate quarantine: the token/deployer blacklist is
+        // operator-maintained, so a later correction must be able to recover
+        // the candidate. `rejected` has no outgoing edge.
         return yield* rejectForSafety(blacklistRejection);
       }
 
@@ -11495,7 +11688,7 @@ export const program = Effect.gen(function* () {
           );
 
           if (cooldownTrigger === "oor") {
-            const newOorCount = existingOorCount + 1;
+            const newOorCount = nextOorExitCount("oor", existingOorCount);
             const cooldownDuration = computeCooldownForExit({
               trigger: "oor",
               consecutiveOorExits: existingOorCount,
@@ -11542,7 +11735,8 @@ export const program = Effect.gen(function* () {
               poolAddress,
               cooldownUntil,
               reason: `Low yield exit`,
-              consecutiveOorExits: 0,
+              // Preserve the OOR escalation count (see nextOorExitCount).
+              consecutiveOorExits: nextOorExitCount("low-yield", existingOorCount),
             };
           }
 

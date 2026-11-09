@@ -122,9 +122,7 @@ function sendMessage(
       );
     }
   }).pipe(
-    Effect.catch((error) =>
-      Effect.sync(() => console.error("Telegram sendMessage failed", error)),
-    ),
+    Effect.catch((error) => Effect.sync(() => console.error("Telegram sendMessage failed", error))),
     Effect.asVoid,
   );
 }
@@ -697,7 +695,7 @@ app.post("/internal/deliver-alert", async (c) => {
 const FLUSH_BATCH_LIMIT = 10;
 const FLUSH_ABANDON_ATTEMPTS = 5;
 // A claim older than this (ms) is considered interrupted (the flush that made
-// it crashed) and is reclaimed as pending on the next flush. Flushes run on a
+// it crashed) and its claim is released on the next flush. Flushes run on a
 // 5-minute cron and a single flush takes seconds, so 5 minutes is a wide,
 // safe window: it never reclaims a genuinely in-flight claim.
 const CLAIM_RECLAIM_MS = 5 * 60 * 1000;
@@ -711,17 +709,18 @@ app.post("/internal/flush-alerts", async (c) => {
 
   const result = await Effect.runPromise(
     Effect.gen(function* () {
-      // Reclaim stale claims first: a flush that crashed after its claim
-      // UPDATE would otherwise leave rows stuck at delivered_at = 'claim:...'
-      // forever (later flushes only select delivered_at IS NULL). The claim
-      // token embeds the claim time, so any claim older than the reclaim
-      // window is treated as interrupted and pushed back to pending with an
-      // extra delivery_attempt (so repeated claim-crash cycles eventually hit
-      // the abandoned threshold).
+      // Deploy-window straggler: a flush still running the OLD worker code
+      // during the migration writes delivered_at = 'claim:...' without the new
+      // columns. That row is invisible to both the pending and the claimed
+      // query, so it would never be delivered again. Only release claims that
+      // are already STALE — an old worker may have claimed the row seconds ago
+      // and still be sending it, and releasing that would let this flush send
+      // the same alert concurrently. The legacy token embeds a ms epoch, so the
+      // cutoff is like-with-like.
       yield* Effect.tryPromise(() =>
         c.env.DB.prepare(
           `UPDATE alerts
-           SET delivered_at = NULL, delivery_attempts = delivery_attempts + 1
+           SET delivered_at = NULL
            WHERE delivered_at LIKE 'claim:%'
              AND CAST(substr(delivered_at, 7) AS INTEGER) < ?`,
         )
@@ -729,22 +728,39 @@ app.post("/internal/flush-alerts", async (c) => {
           .all(),
       );
 
-      // Atomic claim: a single UPDATE marks the batch as claimed by storing a
-      // unique claim token in delivered_at, so two concurrent flushes cannot
-      // both select (and therefore both deliver) the same rows. The pending
-      // and abandoned queries both filter on delivered_at IS NULL, so in-flight
-      // claims are invisible to every other flush. A row is released back to
-      // pending (delivered_at = NULL) on delivery failure.
-      const claimToken = `claim:${Date.now()}:${crypto.randomUUID()}`;
+      // Reclaim stale claims first: a flush that crashed after its claim
+      // UPDATE would otherwise leave a row claimed forever (later flushes only
+      // pick up unclaimed rows). claimed_at is a millisecond epoch, so the
+      // comparison here is like-with-like. A reclaim only releases the claim:
+      // a lost claim is not a failed delivery, so delivery_attempts is
+      // untouched.
       yield* Effect.tryPromise(() =>
         c.env.DB.prepare(
           `UPDATE alerts
-           SET delivered_at = ?
+           SET claim_token = NULL, claimed_at = NULL
+           WHERE claim_token IS NOT NULL
+             AND delivered_at IS NULL
+             AND claimed_at < ?`,
+        )
+          .bind(Date.now() - CLAIM_RECLAIM_MS)
+          .all(),
+      );
+
+      // Atomic claim: a single UPDATE marks the batch as claimed by storing a
+      // unique claim token, so two concurrent flushes cannot both select (and
+      // therefore both deliver) the same rows. Only unclaimed, undelivered
+      // rows are eligible, so another flush's claim is invisible here.
+      const claimToken = crypto.randomUUID();
+      yield* Effect.tryPromise(() =>
+        c.env.DB.prepare(
+          `UPDATE alerts
+           SET claim_token = ?, claimed_at = ?
            WHERE id IN (
              SELECT a.id
              FROM alerts a
              JOIN users u ON a.user_id = u.id
-             WHERE a.delivered_at IS NULL
+             WHERE a.claim_token IS NULL
+               AND a.delivered_at IS NULL
                AND a.delivery_attempts < ?
                AND u.telegram_id IS NOT NULL
                AND u.alerts_enabled != 0
@@ -752,7 +768,7 @@ app.post("/internal/flush-alerts", async (c) => {
              LIMIT ?
            )`,
         )
-          .bind(claimToken, FLUSH_ABANDON_ATTEMPTS, FLUSH_BATCH_LIMIT)
+          .bind(claimToken, Date.now(), FLUSH_ABANDON_ATTEMPTS, FLUSH_BATCH_LIMIT)
           .all(),
       );
 
@@ -763,7 +779,7 @@ app.post("/internal/flush-alerts", async (c) => {
           `SELECT a.id, a.type, a.severity, a.message, a.pool_address, u.telegram_id
            FROM alerts a
            JOIN users u ON a.user_id = u.id
-           WHERE a.delivered_at = ?`,
+           WHERE a.claim_token = ?`,
         )
           .bind(claimToken)
           .all(),
@@ -797,18 +813,25 @@ app.post("/internal/flush-alerts", async (c) => {
           );
           if (ok) {
             yield* Effect.tryPromise(() =>
-              c.env.DB.prepare("UPDATE alerts SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?")
-                .bind(id)
+              c.env.DB.prepare(
+                `UPDATE alerts
+                 SET delivered_at = CURRENT_TIMESTAMP, claim_token = NULL, claimed_at = NULL
+                 WHERE id = ? AND claim_token = ?`,
+              )
+                .bind(id, claimToken)
                 .run(),
             );
             return "delivered" as const;
           }
-          // Release the claim so the row is retried on a later flush.
+          // Release the claim and charge the failure, so the row is retried on
+          // a later flush until it hits the abandoned threshold.
           yield* Effect.tryPromise(() =>
             c.env.DB.prepare(
-              "UPDATE alerts SET delivered_at = NULL, delivery_attempts = delivery_attempts + 1 WHERE id = ?",
+              `UPDATE alerts
+               SET claim_token = NULL, claimed_at = NULL, delivery_attempts = delivery_attempts + 1
+               WHERE id = ? AND claim_token = ?`,
             )
-              .bind(id)
+              .bind(id, claimToken)
               .run(),
           );
           return "failed" as const;
@@ -827,6 +850,7 @@ app.post("/internal/flush-alerts", async (c) => {
            FROM alerts a
            JOIN users u ON a.user_id = u.id
            WHERE a.delivered_at IS NULL
+             AND a.claim_token IS NULL
              AND a.delivery_attempts >= ?
              AND u.telegram_id IS NOT NULL
              AND u.alerts_enabled != 0`,
