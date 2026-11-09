@@ -709,6 +709,21 @@ app.post("/internal/flush-alerts", async (c) => {
 
   const result = await Effect.runPromise(
     Effect.gen(function* () {
+      // Deploy-window straggler: a flush still running the OLD worker code
+      // during the migration writes delivered_at = 'claim:...' without the new
+      // columns. That row is invisible to both the pending and the claimed
+      // query, so it would never be delivered again. Migrations are applied
+      // before the new worker is deployed, so this only ever matches rows
+      // written in that gap; treat them as interrupted claims and release them
+      // (without charging an attempt).
+      yield* Effect.tryPromise(() =>
+        c.env.DB.prepare(
+          `UPDATE alerts
+           SET delivered_at = NULL
+           WHERE delivered_at LIKE 'claim:%'`,
+        ).all(),
+      );
+
       // Reclaim stale claims first: a flush that crashed after its claim
       // UPDATE would otherwise leave a row claimed forever (later flushes only
       // pick up unclaimed rows). claimed_at is a millisecond epoch, so the

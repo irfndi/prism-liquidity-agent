@@ -51,8 +51,16 @@ export type CandidateLifecycleEvent =
    * decision tail, reconcile, an empty reap, or a paper exit). Without this
    * the scan event ignores `entered` forever and the token is never
    * re-admitted for the life of the row.
+   *
+   * Carries the pool's re-entry cooldown so an externally-closed position can
+   * not re-qualify immediately — the same window the decision tail arms on any
+   * normal exit.
    */
-  | { readonly kind: "entry_closed"; readonly occurredAt: number }
+  | {
+      readonly kind: "entry_closed";
+      readonly occurredAt: number;
+      readonly cooldownUntil: number;
+    }
   | {
       readonly kind: "cooldown_started";
       readonly occurredAt: number;
@@ -243,23 +251,22 @@ function applyEntryConfirmed(
 }
 
 /**
- * `entered` → `discovered` when the position it represented is gone.
+ * `entered` → `cooling_down` when the position it represented is gone.
  *
- * Back to discovery with a fresh streak: the token has to re-qualify on fresh
- * evidence (the pool-level cooldown, not this row, owns how soon re-entry is
- * allowed). Only `entered` rows are affected.
+ * The candidate waits out the same re-entry cooldown the decision tail arms on
+ * a normal exit, then `cooldown_elapsed` returns it to discovery with a fresh
+ * streak. Only `entered` rows are affected.
  */
 function applyEntryClosed(
   candidate: TokenCandidateRecord,
   occurredAt: number,
+  cooldownUntil: number,
 ): TokenCandidateRecord {
   if (candidate.state !== "entered") return candidate;
   return updateSeen(candidate, occurredAt, {
-    state: "discovered",
-    healthyScanCount: 0,
-    eligibleAt: null,
+    state: "cooling_down",
     enteredAt: null,
-    cooldownUntil: null,
+    cooldownUntil,
     rejectionReason: null,
   });
 }
@@ -303,7 +310,7 @@ export function transitionCandidate(
     case "entry_confirmed":
       return applyEntryConfirmed(candidate, event.occurredAt);
     case "entry_closed":
-      return applyEntryClosed(candidate, event.occurredAt);
+      return applyEntryClosed(candidate, event.occurredAt, event.cooldownUntil);
     case "cooldown_started":
       return applyCooldownStarted(candidate, event.occurredAt, event.cooldownUntil);
     case "cooldown_elapsed":

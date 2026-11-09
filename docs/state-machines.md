@@ -204,7 +204,10 @@ history. Sequence that defeats `REPEAT_OOR_COOLDOWN_MS`: OOR exit → OOR exit
 exit restarts at the base cooldown instead of the escalated one. The churn
 throttle branch already preserves the count; the low-yield branch did not.
 
-Fix: the low-yield branch preserves `existingOorCount`.
+Fix: the low-yield branch preserves `existingOorCount`. The decision lives in
+one pure function, `nextOorExitCount(trigger, existing)` (`engine/cooldown.ts`),
+so "only an OOR exit advances the counter" is stated once and unit-tested
+rather than re-implemented at each call site.
 
 **Consequence, and why 2.2 now matters more:** before this fix the low-yield
 branch was the only code path that ever reset the counter, so the escalation
@@ -276,11 +279,13 @@ close in a session where `autonomousExecution` was null. A candidate stuck in
 as an "eligible" candidate that never re-enters.
 
 Fix: a new `entry_closed` event (`engine/candidate-policy.ts`) takes `entered`
-→ `discovered` with a fresh streak. `settleCandidateStates`
-(`engine/program.ts`) emits it once per cycle for any `entered` candidate
-whose pool holds no tracked position — the one place that has both the
-candidate and the position facts. Re-entry timing is unchanged: the
-pool-level cooldown, not this row, owns how soon the pool may re-enter.
+→ `cooling_down`, carrying the same re-entry cooldown the decision tail arms
+on a normal exit (`MIN_REENTRY_COOLDOWN_MS`), so an externally-closed position
+cannot re-qualify immediately. `settleCandidateStates` (`engine/program.ts`)
+emits it once per cycle for any `entered` candidate whose pool holds no
+tracked position — the one place that has both the candidate and the position
+facts. `cooldown_elapsed` then returns the row to `discovered` with a fresh
+streak, as designed.
 
 Tests: `bench/candidate-lifecycle.test.ts` (event semantics),
 `bench/program-autonomous-token.test.ts`.
@@ -374,6 +379,14 @@ stuck once it is past that window, whether or not it rescheduled. The
 unlimited-retry policy is unchanged — only the observability is restored.
 `oldestActiveSettlementAgeMs` now takes the window explicitly so the caller's
 config, not the row's `expires_at`, defines it.
+
+Revival also had to be fixed for this to be sound: `nextOrphanSweepJob`
+re-enqueues a terminal job in place, and it used to keep the ORIGINAL
+`createdAt`. The overdue check is `now - createdAt`, so a job revived one
+second ago would have reported as hours stale and armed `settlement_overdue`
+for work that had just started. A revival now stamps a fresh `createdAt`
+(a new attempt generation with a fresh window) while still carrying `attempts`
+forward, so backoff keeps escalating across generations.
 
 Test: `bench/program-autonomous-token.test.ts` ("counts a retry-forever job
 past its own window as stuck"), which also pins that a job still inside its
@@ -506,6 +519,15 @@ discovery or autonomous mode configured). It advances the counter, resolves the
 pause, and arms it directly when the threshold is met and nothing is latched.
 
 The pause leaves EXIT free, so arming it costs no capital protection.
+
+**Declined review note.** A reviewer suggested distinguishing a *failed*
+discovery fetch from a *successful* empty result before counting the cycle as
+an outage. Not adopted: an engine configured with pools that finds none has no
+route to capital either way, the pause leaves EXIT free, and it auto-resolves
+on the first fully clean cycle (`shouldAutoResolveCoreDataPause` now requires
+the counter to be exactly 0, not merely below the threshold). Tracking fetch
+success per source would add a flag threaded through four discovery paths to
+change only the *wording* of an already-harmless pause.
 
 ---
 

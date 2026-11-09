@@ -334,10 +334,27 @@ describe("autonomous token runtime policy", () => {
     expect(
       shouldAutoResolveCoreDataPause({
         mode: "canary",
-        consecutiveCoreDataFailures: 1,
+        consecutiveCoreDataFailures: 0,
         poolsScannedThisCycle: 3,
       }),
     ).toBe(true);
+
+    // A counter of 1 still means the last cycle failed every pool: the data is
+    // not back, so the latch must hold. Only a fully clean cycle proves it.
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "canary",
+        consecutiveCoreDataFailures: 1,
+        poolsScannedThisCycle: 3,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "live",
+        consecutiveCoreDataFailures: 1,
+        poolsScannedThisCycle: 12,
+      }),
+    ).toBe(false);
 
     // Shadow is informational only — never latches.
     expect(

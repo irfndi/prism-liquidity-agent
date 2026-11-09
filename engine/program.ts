@@ -239,7 +239,7 @@ import {
   ProposalCircuitBreaker,
   type ProposalBackoff,
 } from "./proposal-backoff.js";
-import { computeCooldownForExit } from "./cooldown.js";
+import { computeCooldownForExit, nextOorExitCount } from "./cooldown.js";
 import {
   loadDailyEquityBaseline,
   oldestActiveSettlementAgeMs,
@@ -6364,7 +6364,19 @@ export const program = Effect.gen(function* () {
           },
         );
         autonomousCandidates.set(rejectedCandidate.id, rejectedCandidate);
-        yield* db.saveTokenCandidate(rejectedCandidate).pipe(Effect.catch(() => Effect.void));
+        // catchCause, not catch: saveTokenCandidate wraps Effect.sync, so a
+        // SQLite throw surfaces as a DEFECT and would kill the scheduler fiber.
+        // The in-memory rejection stands regardless — the row is advisory.
+        yield* db.saveTokenCandidate(rejectedCandidate).pipe(
+          Effect.catchCause((cause) =>
+            Effect.sync(() =>
+              logger.warn("Rejected-candidate persistence failed", {
+                candidate: rejectedCandidate.id,
+                cause: String(cause),
+              }),
+            ),
+          ),
+        );
       }
     });
   }
@@ -6583,7 +6595,13 @@ export const program = Effect.gen(function* () {
           return { kind: "cooldown_elapsed", occurredAt: observedAt };
         }
         if (candidate.state === "entered" && !poolsWithPositions.has(candidate.poolAddress)) {
-          return { kind: "entry_closed", occurredAt: observedAt };
+          // Same re-entry window the decision tail arms on a normal exit, so an
+          // externally-closed position cannot re-qualify immediately.
+          return {
+            kind: "entry_closed",
+            occurredAt: observedAt,
+            cooldownUntil: observedAt + (config.minReentryCooldownMs ?? 0),
+          };
         }
         return null;
       }
@@ -11670,7 +11688,7 @@ export const program = Effect.gen(function* () {
           );
 
           if (cooldownTrigger === "oor") {
-            const newOorCount = existingOorCount + 1;
+            const newOorCount = nextOorExitCount("oor", existingOorCount);
             const cooldownDuration = computeCooldownForExit({
               trigger: "oor",
               consecutiveOorExits: existingOorCount,
@@ -11717,10 +11735,8 @@ export const program = Effect.gen(function* () {
               poolAddress,
               cooldownUntil,
               reason: `Low yield exit`,
-              // setPoolCooldown is INSERT OR REPLACE: writing 0 here wiped a
-              // pool's OOR history, so one low-yield exit between OOR exits
-              // reset REPEAT_OOR_COOLDOWN_MS back to the base duration.
-              consecutiveOorExits: existingOorCount,
+              // Preserve the OOR escalation count (see nextOorExitCount).
+              consecutiveOorExits: nextOorExitCount("low-yield", existingOorCount),
             };
           }
 
