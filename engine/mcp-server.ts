@@ -7,6 +7,7 @@ import { AgentStateService, McpServerService } from "./services.js";
 import type { JsonValue } from "./services.js";
 import type { AppConfig } from "./config-service.js";
 import { getCurrentVersion } from "./version.js";
+import { isProposalStale } from "./proposal-schema.js";
 
 const logger = createLogger("McpServer");
 const MAX_STDIN_BUFFER_LENGTH = 65536;
@@ -276,6 +277,46 @@ export class McpServer {
     };
   }
 
+  /**
+   * Requested proposal ids that are past their staleness window.
+   *
+   * Shared by the MCP approval path so it cannot approve evidence the decision
+   * loop will then skip: an approval authorises ONE decision at ONE point in
+   * time and must not outlive it.
+   */
+  private staleApprovalIds(
+    snapshot: PrismStateSnapshot,
+    proposalIds: readonly string[],
+    now: number,
+  ): string[] {
+    const requested = new Set(proposalIds);
+    return snapshot.pendingProposals
+      .filter((proposal) => requested.has(proposal.proposalId))
+      .filter((proposal) => isProposalStale(proposal, this.config.agentProposalStaleMs, now))
+      .map((proposal) => proposal.proposalId);
+  }
+
+  /**
+   * Why these approval ids cannot be granted, or null when they can.
+   *
+   * Two refusals, both about evidence that no longer holds: an id that is not
+   * pending, and one past its staleness window (an approval authorises ONE
+   * decision at ONE point in time and must not outlive it). Shared so the MCP
+   * surface cannot approve what the decision loop would then skip.
+   */
+  private approvalRefusal(
+    snapshot: PrismStateSnapshot,
+    proposalIds: readonly string[],
+    now: number,
+  ): string | null {
+    const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
+    const missing = proposalIds.filter((id) => !pendingIds.has(id));
+    if (missing.length > 0) return `Proposal IDs not found: ${missing.join(", ")}`;
+    const stale = this.staleApprovalIds(snapshot, proposalIds, now);
+    if (stale.length > 0) return `Proposals are stale: ${stale.join(", ")}`;
+    return null;
+  }
+
   private async approveProposalsToolResult(
     arguments_: McpToolArguments,
   ): Promise<McpResponse["result"]> {
@@ -313,11 +354,8 @@ export class McpServer {
       throw new Error(`Batch size ${proposalIds.length} exceeds limit ${maxBatchSize}`);
     }
     const snapshot = await Effect.runPromise(this.state.getSnapshot());
-    const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
-    const missing = proposalIds.filter((id) => !pendingIds.has(id));
-    if (missing.length > 0) {
-      throw new Error(`Proposal IDs not found: ${missing.join(", ")}`);
-    }
+    const approvalRefusal = this.approvalRefusal(snapshot, proposalIds, Date.now());
+    if (approvalRefusal !== null) throw new Error(approvalRefusal);
     for (const proposalId of proposalIds) {
       await Effect.runPromise(this.state.approveProposal(proposalId));
     }

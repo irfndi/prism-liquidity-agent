@@ -119,10 +119,10 @@ export function shouldAutoResolveCoreDataPause(input: CoreDataAutoResolveInput):
     case "canary":
     case "live":
     case "off":
-      return (
-        input.consecutiveCoreDataFailures < CORE_DATA_PAUSE_FAILURE_THRESHOLD &&
-        input.poolsScannedThisCycle > 0
-      );
+      // `=== 0`, not `< threshold`: a counter of 1 means the previous cycle
+      // still failed every pool, so the data has not come back yet and the
+      // latch must hold. Only a fully clean cycle proves recovery.
+      return input.consecutiveCoreDataFailures === 0 && input.poolsScannedThisCycle > 0;
     default:
       throw new Error(`Unhandled autonomous token mode: ${String(input.mode)}`);
   }
@@ -1106,6 +1106,12 @@ function nextOrphanSweepJob(
       amountAtomic: holding.amountAtomic.toString(),
       nextRetryAt: now,
       expiresAt: now + settlementMaxPendingMs,
+      // A revival is a new attempt generation with a fresh window. Keeping the
+      // ORIGINAL createdAt would make the overdue check (`now - createdAt`)
+      // report a brand-new job as hours stale and arm settlement_overdue for
+      // work that just started. `attempts` still carries over, so backoff keeps
+      // escalating across generations.
+      createdAt: now,
       error: null,
       updatedAt: now,
     };
