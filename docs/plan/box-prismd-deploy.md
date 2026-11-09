@@ -1,6 +1,6 @@
-# Box prismd deploy (217.216.35.77) — artifacts only, no box mutation from here
+# Box prismd deploy (<production-host>) — artifacts only, no box mutation from here
 
-Status: prepare-only. SSH from this workstation to `217.216.35.77` as `root`
+Status: prepare-only. SSH from this workstation to `<production-host>` as `root`
 now works (confirmed 2026-09-18). Nothing here restarts units, touches live
 DBs, or mutates the box unless a step explicitly says "ON the box".
 
@@ -127,10 +127,10 @@ native/rust/Cargo.toml`). All three are the same fail-open shadow binary with
 no Bun involved, so the `bun#42664` blocker below does NOT apply to this path.
 
 Copy to the box (run where your key works; SSH from this workstation works
-as of 2026-09-23 — `scp`/`ssh root@217.216.35.77` both verified):
+as of 2026-09-23 — `scp`/`ssh root@<production-host>` both verified):
 
 ```sh
-scp prismd-<version>-linux-x64 prismd-<version>-linux-x64.sha256 <user>@217.216.35.77:/tmp/
+scp prismd-<version>-linux-x64 prismd-<version>-linux-x64.sha256 <user>@<production-host>:/tmp/
 ```
 
 ```sh

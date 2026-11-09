@@ -5,6 +5,7 @@ import { Schema } from "effect";
 import { getPrismDbPath } from "../engine/paths.js";
 import {
   buildRuleAttribution,
+  DEFAULT_ENTER_LOOKBACK_MS,
   type AttributionDecision,
   type AttributionPosition,
   type RuleAttributionReport,
@@ -118,7 +119,12 @@ export function readForensicsReport(
 
   const db = new Database(dbPath, { readonly: true });
   try {
-    const auditRows = loadAuditRows(db, windowMs, cutoff);
+    // Widen the AUDIT window by the ENTER lookback: a position closed just
+    // inside the window can have been opened by an ENTER before it, and that
+    // row is what attribution credits. Positions keep the plain cutoff.
+    const enterLookbackMs = options.enterLookbackMs ?? DEFAULT_ENTER_LOOKBACK_MS;
+    const auditCutoff = windowMs > 0 ? cutoff - enterLookbackMs : 0;
+    const auditRows = loadAuditRows(db, windowMs, auditCutoff);
     const positionRows = loadPositionRows(db, windowMs, cutoff);
     return buildRuleAttribution({
       decisions: auditRows.map(toDecision),

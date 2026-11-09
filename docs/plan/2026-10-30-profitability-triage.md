@@ -1,12 +1,12 @@
 # Profitability triage — 2026-10-30
 
-**Status:** triage plan + first tooling. The live box (`217.216.35.77`) **was read on 2026-10-30**; §0 supersedes the 2026-09-05 review for current state. §1–§5 remain the method and the historical context.
+**Status:** triage plan + first tooling. The live box (`<production-host>`) **was read on 2026-10-30**; §0 supersedes the 2026-09-05 review for current state. §1–§5 remain the method and the historical context.
 
 ---
 
 ## 0. Live inspection — 2026-10-30
 
-Host `vmi2933244`, production `prism-agent.service` under **root's user systemd** (not the system unit), active since 2026-10-21, 813 MB RSS, build `0.2.44-canary.20261020T171447-c9271436`. DB 781 MB (`audit` 121k rows, `pool_snapshots` 18k). Last close **2026-10-29 14:48** — the position-exit path is working; the stale “last close Aug 27” note is obsolete.
+Host `<production-hostname>`, production `prism-agent.service` under **root's user systemd** (not the system unit), active since 2026-10-21, 813 MB RSS, build `0.2.44-canary.20261020T171447-c9271436`. DB 781 MB (`audit` 121k rows, `pool_snapshots` 18k). Last close **2026-10-29 14:48** — the position-exit path is working; the stale “last close Aug 27” note is obsolete.
 
 | Slice | Closes | Realized | Win rate | PF | Avg hold |
 | --- | ---: | ---: | ---: | ---: | ---: |
