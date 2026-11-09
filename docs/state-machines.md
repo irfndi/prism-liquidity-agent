@@ -487,13 +487,25 @@ resolver can be written against the type yet, and its correct resolution
 condition is "a later settlement write succeeded" — a signal the cycle does
 not carry today.
 
-### 5.3 [OPEN, medium] The core-data counter cannot see a total outage that scans nothing
+### 5.3 [FIXED, medium] A total outage that scans nothing now reaches the breaker
 
-`updateCoreDataFailureCounter` (`engine/program.ts:4091`) increments only when
+`updateCoreDataFailureCounter` incremented only when
 `poolsScanned > 0 && failuresThisCycle >= poolsScanned`, and the arm needs two
 consecutive such cycles. A dead RPC that makes discovery return zero pools
-scans nothing, so the counter resets to 0 (`:4096`) and the breaker reads the
-outage as healthy — exactly the state `core_data_unavailable` exists to catch.
+scans nothing, so the counter reset to 0 and the breaker read the outage as
+healthy — exactly the state `core_data_unavailable` exists to catch.
+
+Fix: the counter takes `expectedPools` and counts an expected-but-empty cycle.
+The second half is the part a counter change alone could not do: `runScanCycle`
+returns early when `poolsToScan` is empty, **before** `finalizeScanCycle`, so
+`finalizeScanCycle` was never the right owner for this case.
+`accountCoreDataAvailability` now runs on both paths — from `finalizeScanCycle`
+with the real counts, and from the empty-cycle early return with
+`expectedPools = expectsPoolsToScan() ? 1 : 0` (watchlist, market scan,
+discovery or autonomous mode configured). It advances the counter, resolves the
+pause, and arms it directly when the threshold is met and nothing is latched.
+
+The pause leaves EXIT free, so arming it costs no capital protection.
 
 ---
 

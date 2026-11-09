@@ -249,6 +249,7 @@ import {
   settlementOverduePauseAction,
   shouldAutoResolveDailyDrawdownPause,
   shouldAutoResolveCoreDataPause,
+  CORE_DATA_PAUSE_FAILURE_THRESHOLD,
   shouldAutoResolveExecutionFailuresPause,
   decayExecutionFailureCounter,
   shouldTriggerSafetyPause,
@@ -8584,6 +8585,54 @@ export const program = Effect.gen(function* () {
     return Effect.void;
   }
 
+  /** True when the engine is configured to source pools from somewhere. */
+  function expectsPoolsToScan(): boolean {
+    return (
+      config.watchlistPools.length > 0 ||
+      config.marketScanEnabled === true ||
+      config.enablePoolDiscovery === true ||
+      config.autonomousTokenMode !== "off"
+    );
+  }
+
+  /**
+   * Core-data accounting for one cycle: advance the consecutive-failure
+   * counter, then resolve or arm the `core_data_unavailable` pause.
+   *
+   * Called from BOTH cycle paths. A cycle that scans nothing returns before
+   * `finalizeScanCycle`, so the counter was never advanced for the one outage
+   * shape it exists to catch — discovery returning no pools at all. The pause
+   * it arms blocks only ENTER/REBALANCE; EXIT stays free.
+   */
+  function accountCoreDataAvailability(
+    poolsScanned: number,
+    expectedPools: number,
+  ): Effect.Effect<void, never> {
+    return Effect.gen(function* () {
+      consecutiveCoreDataFailures = updateCoreDataFailureCounter(
+        consecutiveCoreDataFailures,
+        poolsScanned,
+        coreDataFailuresThisCycle,
+        expectedPools,
+      );
+      yield* resolveCycleCoreDataPause(poolsScanned);
+      if (
+        autonomousExecution &&
+        !isSafetyPauseArmed(activeSafetyPause) &&
+        consecutiveCoreDataFailures >= CORE_DATA_PAUSE_FAILURE_THRESHOLD
+      ) {
+        activeSafetyPause = {
+          walletAddress: autonomousExecution.walletAddress,
+          agentInstanceId: autonomousExecution.agentInstanceId,
+          reason: "core_data_unavailable",
+          triggeredAt: Date.now(),
+          resolvedAt: null,
+        };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+      }
+    });
+  }
+
   // Single chain reconciliation of the wallet value for this cycle. Read
   // ONCE here and reuse for every pool's risk/sizing context — a per-pool
   // read both wasted RPC and let a transient failure blank individual
@@ -8799,18 +8848,7 @@ export const program = Effect.gen(function* () {
       ) {
         yield* runIdleRedeployPass(idleRedeployCandidates, cycle, executedExitPools);
       }
-      consecutiveCoreDataFailures = updateCoreDataFailureCounter(
-        consecutiveCoreDataFailures,
-        cycle.poolsScanned,
-        coreDataFailuresThisCycle,
-        poolsToScan.length,
-      );
-      // Resolve BEFORE the arm block so a genuine breach re-arms in the same
-      // pass instead of toggling, and so the resolver judges the counter this
-      // cycle just recomputed. Only core_data_unavailable resolves here: its
-      // evidence (the counter + whether anything was scanned) exists only at
-      // the tail.
-      yield* resolveCycleCoreDataPause(cycle.poolsScanned);
+      yield* accountCoreDataAvailability(cycle.poolsScanned, poolsToScan.length);
       // Issue #182: quiet-cycle decay BEFORE the arm evaluates — a cycle with
       // no execution failures resets the consecutive counter, so a stale
       // breach from a previous spike can never re-arm the pause in the same
@@ -8940,6 +8978,10 @@ export const program = Effect.gen(function* () {
           consecutiveExecutionFailures,
           executionFailuresThisCycle,
         );
+        // The one path where an expected-but-empty scan set is observable:
+        // this return skips finalizeScanCycle, so without this the
+        // core_data_unavailable breaker could never see a discovery outage.
+        yield* accountCoreDataAvailability(0, expectsPoolsToScan() ? 1 : 0);
         cycle.completedAt = Date.now();
         return;
       }
