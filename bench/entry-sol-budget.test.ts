@@ -7,6 +7,7 @@ import {
 } from "../engine/constants.js";
 import {
   estimateEntrySolLamports,
+  fitEntrySizeToSolBudget,
   freeEntrySolLamports,
   hasNativeSolLeg,
   usdToLamports,
@@ -95,6 +96,61 @@ describe("estimateEntrySolLamports", () => {
     });
     // (270 − 27)/270 × 1.01 = 0.909 SOL difference.
     expect(large - small).toBe(909_000_000n);
+  });
+});
+
+describe("fitEntrySizeToSolBudget", () => {
+  const base = {
+    solPriceUsd: 100,
+    poolHasSolLeg: true,
+    solFunded: true,
+    minSizeUsd: 10,
+  } as const;
+
+  it("keeps the desired size when it fits", () => {
+    expect(
+      fitEntrySizeToSolBudget({ ...base, desiredSizeUsd: 20, freeSolLamports: 2_000_000_000n }),
+    ).toBe(20);
+  });
+
+  it("shrinks to the largest whole-dollar size the free SOL can fund", () => {
+    // fixed 0.23 SOL; 1.07 SOL left ≈ $107 → $105 entry after the 1.01 buffer.
+    expect(
+      fitEntrySizeToSolBudget({
+        ...base,
+        desiredSizeUsd: 500,
+        freeSolLamports: 1_300_000_000n,
+      }),
+    ).toBe(105);
+  });
+
+  it("returns null when even the floor does not fit", () => {
+    expect(
+      fitEntrySizeToSolBudget({ ...base, desiredSizeUsd: 500, freeSolLamports: 240_000_000n }),
+    ).toBeNull();
+  });
+
+  it("never returns a size below the floor or above the desired size", () => {
+    const fitted = fitEntrySizeToSolBudget({
+      ...base,
+      desiredSizeUsd: 12,
+      freeSolLamports: 400_000_000n,
+    });
+    expect(fitted).not.toBeNull();
+    expect(fitted).toBeGreaterThanOrEqual(10);
+    expect(fitted).toBeLessThanOrEqual(12);
+  });
+
+  it("returns null for unusable inputs (price, floor, free SOL)", () => {
+    expect(
+      fitEntrySizeToSolBudget({ ...base, desiredSizeUsd: 20, solPriceUsd: 0, freeSolLamports: 1n }),
+    ).toBeNull();
+    expect(
+      fitEntrySizeToSolBudget({ ...base, desiredSizeUsd: 20, minSizeUsd: 0, freeSolLamports: 1n }),
+    ).toBeNull();
+    expect(
+      fitEntrySizeToSolBudget({ ...base, desiredSizeUsd: 20, freeSolLamports: 0n }),
+    ).toBeNull();
   });
 });
 

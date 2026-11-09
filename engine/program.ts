@@ -19,7 +19,6 @@ import {
   evaluatePaperValidation,
 } from "./risk-service.js";
 import {
-  computeBinVolatilityStddev,
   isHighVolatility,
   recommendBinRangeForVolatility,
   dipOffsetBinsForPct,
@@ -40,6 +39,12 @@ import {
   DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
 } from "./strategy-service.js";
 import type { EvolvableThresholds } from "./strategy-service.js";
+import {
+  assemblePoolFacts,
+  assemblePositionFacts,
+  hodlBenchmarkUsd,
+  resolvePoolDriftMetrics,
+} from "./cycle/facts.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive, type ScreenerConfig } from "./screener-service.js";
@@ -245,20 +250,21 @@ import {
   oldestActiveSettlementAgeMs,
   persistDailyEquityBaseline,
   processSettlementJobs,
+  persistSweptSettlementJobs,
   safetyPauseBlockReason,
   settlementOverduePauseAction,
-  shouldAutoResolveDailyDrawdownPause,
   shouldAutoResolveCoreDataPause,
+  shouldAutoResolveDailyDrawdownPause,
   CORE_DATA_PAUSE_FAILURE_THRESHOLD,
   shouldAutoResolveExecutionFailuresPause,
   decayExecutionFailureCounter,
   shouldTriggerSafetyPause,
   sweepOrphanSettlements,
-  persistSweptSettlementJobs,
 } from "./autonomous-runtime.js";
 import { routeProbeAmountAtomic } from "./route-probe.js";
 import {
   estimateEntrySolLamports,
+  fitEntrySizeToSolBudget,
   freeEntrySolLamports,
   hasNativeSolLeg,
 } from "./entry-sol-budget.js";
@@ -507,6 +513,33 @@ export interface JevStressHalveResult {
   readonly halved: boolean;
   readonly floored: boolean;
   readonly positionSizeUsd: number;
+}
+
+/**
+ * Shrink an approved ENTER to the free SOL budget. Returns null when the size
+ * already fits (keep the plan) or even the floor cannot be funded (skip).
+ */
+function resizeEnterToFreeSol(input: {
+  readonly desiredSizeUsd: number;
+  readonly freeSolLamports: bigint;
+  readonly solPriceUsd: number;
+  readonly poolHasSolLeg: boolean;
+}): { readonly sizeUsd: number; readonly lamports: bigint } | null {
+  const sizeUsd = fitEntrySizeToSolBudget({
+    ...input,
+    solFunded: true,
+    minSizeUsd: ENTRY_SIZE_FLOOR_USD,
+  });
+  if (sizeUsd === null || sizeUsd >= input.desiredSizeUsd) return null;
+  return {
+    sizeUsd,
+    lamports: estimateEntrySolLamports({
+      positionSizeUsd: sizeUsd,
+      solPriceUsd: input.solPriceUsd,
+      poolHasSolLeg: input.poolHasSolLeg,
+      solFunded: true,
+    }),
+  };
 }
 
 /** Halve the full size on stress, floored at ENTRY_SIZE_FLOOR_USD. Pure. */
@@ -1694,8 +1727,12 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const copySignalLayer = Layer.provide(CopySignalLive, configLayer);
   const merged17 = Layer.merge(merged16, copySignalLayer);
 
+  // A layer-construction failure (ConfigError) is a defect, not a recoverable
+  // program failure: buildLayer receives an already-validated config, so this
+  // only fires on a genuine bug. orDie makes the declared `never` error channel
+  // honest instead of asserted.
   // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  return merged17 as Layer.Layer<AllServices, never, never>;
+  return Layer.orDie(merged17) as Layer.Layer<AllServices, never, never>;
 }
 
 /**
@@ -3522,9 +3559,12 @@ function settleLiveExitAttribution(
     yield* recordExitSweepEvents(deps, decision, pool, pos, exitResultData, now);
     const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
     const pricingUnresolved = withdrawnUsd === null;
-    const realizedPnlUsd = exitResultData.isEmptyReap
-      ? 0
-      : pricingUnresolved || attributable.length > 0
+    // An empty reap withdrew nothing, but its cost basis cannot be trusted
+    // (the account held no liquidity, so the booked deposit may never have
+    // landed). Realized is n/a — booking 0 reads as a break-even trade and
+    // hides it from the rolling halt / kill switch.
+    const realizedPnlUsd =
+      exitResultData.isEmptyReap || pricingUnresolved || attributable.length > 0
         ? null
         : computeRealizedPnlUsd(
             withdrawnUsd,
@@ -3563,6 +3603,9 @@ function settleLiveExitAttribution(
           settlementPending: attributable.length,
           txSignature: exitResultData.txSignature,
           exitReason: decision.reasoning,
+          ...(exitResultData.isEmptyReap
+            ? { pricing: "unresolved" as const, emptyReap: true }
+            : undefined),
         },
         createdAt: now,
       })
@@ -3618,9 +3661,12 @@ function computeLedgerExitRealized(
   //    (exit swap, entry/exit gas, claim txs) debit the gross figure: they
   //    are spent on-chain but appear in no measured USD amount above.
   const modeledCostsUsd = isEmptyReap ? 0 : liveCloseCostsUsd(costs);
-  const realizedPnlUsd = isEmptyReap
-    ? 0
-    : pricingUnresolved
+  // Empty reap: nothing was withdrawn, but the cost basis is unverifiable —
+  // the on-chain account held zero liquidity, so the booked deposit may never
+  // have landed. Recording 0 would look like a break-even close and keep the
+  // position out of every PnL breaker. NULL (n/a) is the honest record.
+  const realizedPnlUsd =
+    isEmptyReap || pricingUnresolved
       ? null
       : computeRealizedPnlUsd(
           withdrawnUsd,
@@ -3835,13 +3881,15 @@ function buildExitMetadata(
   exitResultData: LiveExitResultData | null,
   modeledCostsUsd: number,
   exitReason?: string,
+  isEmptyReap = false,
 ) {
   const reason = exitReasonField(exitReason);
-  if (!pricingUnresolved) return { realizedPnlUsd, modeledCostsUsd, ...reason };
+  if (!pricingUnresolved && !isEmptyReap) return { realizedPnlUsd, modeledCostsUsd, ...reason };
   return {
     realizedPnlUsd,
     modeledCostsUsd,
     pricing: "unresolved",
+    ...(isEmptyReap ? { emptyReap: true } : undefined),
     lastMarkUsd: currentValueUsd,
     ...reason,
     ...unresolvedExitRaw(exitResultData),
@@ -3928,6 +3976,7 @@ function finalizeLiveExitLedger(
       exitResultData,
       modeledCostsUsd,
       decision.reasoning,
+      exitResultData?.isEmptyReap ?? false,
     );
     yield* deps.db
       .savePositionEvent({
@@ -6419,6 +6468,12 @@ export const program = Effect.gen(function* () {
   let marketRankedPools: ReadonlyArray<MarketPoolRank> = [];
   let lastMarketRefreshAt = 0;
   const marketScanPools = new Set<string>();
+  // Pools rejected by an IMMUTABLE safety fact (currently: a Token-2022
+  // transfer-fee extension, which cannot be removed from a mint). Rescreening
+  // them every cycle produced 48,723 identical HOLD rows on the live box and
+  // burned an on-chain mint read per cycle. Process-lifetime is exact: the
+  // fact cannot change without a restart (ALLOW_TRANSFER_FEE_TOKENS included).
+  const permanentlyUnsafePools = new Set<string>();
   // RugCheck reports cached for the process lifetime (security facts change
   // slowly; mints recur across discovery pages). Previously constructed per
   // fallen-angel refresh invocation, refetching identical mints every cycle.
@@ -6536,7 +6591,7 @@ export const program = Effect.gen(function* () {
       fallenAngelCandidatePools,
       launchScanPools,
       heldPoolAddresses: heldPools,
-    });
+    }).filter((address) => !permanentlyUnsafePools.has(address) || heldPools.has(address));
   };
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
@@ -7786,6 +7841,34 @@ export const program = Effect.gen(function* () {
     readonly executionError: string | undefined;
   }
 
+  /**
+   * Fits an idle-redeploy entry into the free SOL budget.
+   *
+   * Full size when it fits; otherwise the largest whole-dollar size the budget
+   * funds, never below the entry floor. Returns null when even the floor cannot
+   * be funded — the caller records a capacity-limited skip, never an error.
+   * Same resize-before-skip contract as the in-slot ENTER path.
+   */
+  function fitRedeployToSolBudget(
+    sizeUsd: number,
+    pool: PoolState,
+  ): { readonly sizeUsd: number; readonly lamports: bigint } | null {
+    if (!entrySolBudgetKnown) return null;
+    const neededLamports = estimateEntrySolLamports({
+      positionSizeUsd: sizeUsd,
+      solPriceUsd: entrySolPriceUsd,
+      poolHasSolLeg: hasNativeSolLeg(pool),
+      solFunded: true,
+    });
+    if (neededLamports <= entrySolBudgetLamports) return { sizeUsd, lamports: neededLamports };
+    return resizeEnterToFreeSol({
+      desiredSizeUsd: sizeUsd,
+      freeSolLamports: entrySolBudgetLamports,
+      solPriceUsd: entrySolPriceUsd,
+      poolHasSolLeg: hasNativeSolLeg(pool),
+    });
+  }
+
   function dispatchRedeployExecution(
     ctx: RedeployCandidateContext,
     decision: AgentDecision,
@@ -7873,17 +7956,21 @@ export const program = Effect.gen(function* () {
             if (solFundedEntryMode) {
               const redeploySizeUsd = decision.positionSizeUsd;
               if (redeploySizeUsd !== undefined) {
-                const neededLamports = estimateEntrySolLamports({
-                  positionSizeUsd: redeploySizeUsd,
-                  solPriceUsd: entrySolPriceUsd,
-                  poolHasSolLeg: hasNativeSolLeg(candidate.pool),
-                  solFunded: true,
-                });
-                if (!entrySolBudgetKnown || neededLamports > entrySolBudgetLamports) {
+                const fitted = fitRedeployToSolBudget(redeploySizeUsd, candidate.pool);
+                if (fitted === null) {
                   const budgetHuman = entrySolBudgetKnown
                     ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
                     : "unknown";
-                  const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
+                  const neededHuman = (
+                    Number(
+                      estimateEntrySolLamports({
+                        positionSizeUsd: redeploySizeUsd,
+                        solPriceUsd: entrySolPriceUsd,
+                        poolHasSolLeg: hasNativeSolLeg(candidate.pool),
+                        solFunded: true,
+                      }),
+                    ) / 1e9
+                  ).toFixed(4);
                   idleRedeployLogger.info(
                     "Idle redeploy skipped — free SOL below entry estimate (wallet reserve)",
                     {
@@ -7901,7 +7988,18 @@ export const program = Effect.gen(function* () {
                   yield* finalizeAppliedProposal(agentState, undefined, false, decision.action);
                   return { verdict: "next", executed: false, executionError: undefined };
                 }
-                entrySolBudgetLamports -= neededLamports;
+                if (fitted.sizeUsd !== redeploySizeUsd) {
+                  decision.positionSizeUsd = fitted.sizeUsd;
+                  idleRedeployLogger.info(
+                    "[wallet-reserve] resized idle redeploy to fit free SOL",
+                    {
+                      pool: candidate.poolAddress,
+                      from: redeploySizeUsd,
+                      to: fitted.sizeUsd,
+                    },
+                  );
+                }
+                entrySolBudgetLamports -= fitted.lamports;
               }
             }
             const entryPrep = yield* EntryPrepService;
@@ -9506,6 +9604,9 @@ export const program = Effect.gen(function* () {
           })
           .pipe(Effect.catch(() => Effect.void));
         yield* recordSafetyWarning(`Safety screening rejected ${poolAddress}: ${reason}`);
+        // Only verdicts that can never be exempted quarantine the candidate:
+        // `rejected` has no outgoing edge, so a freeze-authority or
+        // verification gap (a hold that clears next cycle) must not use it.
         return [];
       });
     return Effect.gen(function* () {
@@ -9514,6 +9615,7 @@ export const program = Effect.gen(function* () {
         // The only verdict quarantined on the candidate: a third-party
         // blacklist that is never exempted by any config flag, so there is no
         // operator action that could legitimately rehabilitate it.
+        permanentlyUnsafePools.add(poolAddress);
         yield* rejectCandidatesForPool(poolAddress, "Meteora Data API flags pool as blacklisted");
         return yield* rejectForSafety("Meteora Data API flags pool as blacklisted");
       }
@@ -9553,8 +9655,14 @@ export const program = Effect.gen(function* () {
       const feeReject = yield* checkTransferFeeLegs();
       if (feeReject) {
         // NOT a candidate quarantine: whether a transfer-fee leg is allowed is
-        // config-dependent (ALLOW_TRANSFER_FEE_TOKENS), so the verdict must stay
-        // re-evaluable. `rejected` has no outgoing edge.
+        // config-dependent (ALLOW_TRANSFER_FEE_TOKENS), so the PERSISTED
+        // `rejected` state (no outgoing edge) must stay re-evaluable.
+        //
+        // The in-memory skip is a different thing and still applies: the
+        // Token-2022 transfer-fee extension is immutable, so this process has
+        // nothing new to learn by re-screening the pool every cycle. It clears
+        // on restart, which is exactly when a config flip takes effect.
+        permanentlyUnsafePools.add(poolAddress);
         return yield* rejectForSafety(feeReject);
       }
       // ─── Hot-lane rug precondition — mint authority (market-scan/runner) ──
@@ -10212,35 +10320,7 @@ export const program = Effect.gen(function* () {
     });
   }
 
-  /** Net active-bin drift + realized volatility over the recent-bin ring. */
-  interface PoolDriftMetrics {
-    readonly netDriftBins: number;
-    readonly volatilityStddev: number;
-    readonly volatilityBins: ReadonlyArray<number>;
-    readonly recentBins: ReadonlyArray<number>;
-  }
-  function resolvePoolDriftMetrics(
-    binHistory: ReadonlyMap<string, ReadonlyArray<number>>,
-    poolAddress: string,
-    volatilityLookbackSnapshots: number,
-  ): PoolDriftMetrics {
-    const recentBins = binHistory.get(poolAddress) ?? [];
-    // Net active-bin drift over the recent-bin ring — the momentum signal
-    // shared by the entry-shape resolution, the drift gate, and runner
-    // admission. Null when the pool has no bin history (cold start): runner
-    // admission fails OPEN on unknown drift (it cannot prove a decline).
-    const netDriftBins =
-      recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
-    const lookback = Math.max(2, volatilityLookbackSnapshots);
-    const volatilityBins =
-      recentBins.length > lookback ? recentBins.slice(recentBins.length - lookback) : recentBins;
-    return {
-      netDriftBins,
-      volatilityStddev: computeBinVolatilityStddev(volatilityBins),
-      volatilityBins,
-      recentBins,
-    };
-  }
+  // Pool drift metrics are pure fact derivation — see engine/cycle/facts.ts.
   /** Deposit distribution for entries: configured shape as-is; auto picks from volatility regime. */
   function resolveEntryStrategySpec(
     entryStrategyType: EntryStrategyType,
@@ -10434,11 +10514,12 @@ export const program = Effect.gen(function* () {
       const isMarketRunner = entryGates.isMarketRunner;
       const w15Signals = entryGates.w15Signals;
 
-      // Decision rules
-      const feeIlRatio = metrics.feeIlRatio;
-      const volumeAuth = metrics.volumeAuthenticity;
-      const tvlVelocity = metrics.tvlVelocity;
-      const binUtilization = metrics.binUtilization;
+      // Decision rules read the assembled pool facts, not raw metric fields.
+      const poolFacts = entryGates.poolFacts;
+      const feeIlRatio = poolFacts.feeIlRatio;
+      const volumeAuth = poolFacts.volumeAuthenticity;
+      const tvlVelocity = poolFacts.tvlVelocity;
+      const binUtilization = poolFacts.binUtilization;
 
       /** IL-dominance signal (null = gate does not apply this cycle). */
       interface IlDominanceSignal {
@@ -10734,36 +10815,24 @@ export const program = Effect.gen(function* () {
       // bleed), entry legs are known, and unrealized IL exceeds cumulative
       // fees by the configured factor and the USD floor.
       function computeIlDominance(pos: PositionRecord): IlDominanceSignal | null {
+        if (config.ilProtectionEnabled !== true || pos.outOfRangeSince === null) return null;
+        // currentValueUsd is the heuristic estimatePositionValue mark refreshed
+        // in the per-position value loop above, not an oracle price; the HODL
+        // benchmark is the real on-chain entry legs.
+        const hodlValueUsd = hodlBenchmarkUsd(pos, pool.currentPrice);
+        if (hodlValueUsd === null) return null;
+        const facts = assemblePositionFacts(pos, hodlValueUsd);
+        const ilUsd = hodlValueUsd - facts.currentValueUsd;
+        const feesClaimedUsd = facts.cumulativeFeesClaimedUsd;
         if (
-          config.ilProtectionEnabled === true &&
-          pos.outOfRangeSince !== null &&
-          pos.entryAmountXUsd != null &&
-          pos.entryAmountYUsd != null &&
-          pos.entryPriceUsd != null
+          isIlDominant(
+            ilUsd,
+            feesClaimedUsd,
+            config.ilDominanceExitFactor,
+            config.ilDominanceMinUsd,
+          )
         ) {
-          // currentValueUsd is the heuristic estimatePositionValue mark
-          // refreshed in the per-position value loop above, not an oracle
-          // price; the HODL benchmark is the real on-chain entry legs.
-          const hodlValueUsd = computeHodlValueUsd(
-            pos.entryAmountXUsd,
-            pos.entryAmountYUsd,
-            pos.entryPriceUsd,
-            pool.currentPrice,
-          );
-          if (hodlValueUsd !== null) {
-            const ilUsd = hodlValueUsd - pos.currentValueUsd;
-            const feesClaimedUsd = pos.cumulativeFeesClaimedUsd;
-            if (
-              isIlDominant(
-                ilUsd,
-                feesClaimedUsd,
-                config.ilDominanceExitFactor,
-                config.ilDominanceMinUsd,
-              )
-            ) {
-              return { ilUsd, hodlValueUsd, feesClaimedUsd };
-            }
-          }
+          return { ilUsd, hodlValueUsd, feesClaimedUsd };
         }
         return null;
       }
@@ -12680,7 +12749,7 @@ export const program = Effect.gen(function* () {
             action: "ENTER",
             poolAddress,
             confidence: 0.75,
-            reasoning: `Fallen-angel: ${faSignal.assetMint} down ${(faSignal.drawdownPct * 100).toFixed(0)}% from ATH, RugCheck-clean, TVL $${pool.tvlUsd.toFixed(0)}`,
+            reasoning: `[fallen-angel-enter] ${faSignal.assetMint} down ${(faSignal.drawdownPct * 100).toFixed(0)}% from ATH, RugCheck-clean, TVL $${pool.tvlUsd.toFixed(0)}`,
             positionSizeUsd: faAllocation.adjustedDepositUsd,
             positionMode: "fallen-angel",
             tpLadderJson: serializeTpLadder(faLadder.ladder) ?? undefined,
@@ -13332,7 +13401,7 @@ export const program = Effect.gen(function* () {
                   action: "ENTER",
                   poolAddress,
                   confidence: Math.min(0.5 + feeIlRatio * 0.05, 0.85),
-                  reasoning: `Launch: launch-gated hot pool — time-boxed entry, $${launchAllocation.adjustedDepositUsd.toFixed(0)}`,
+                  reasoning: `[launch-enter] launch-gated hot pool — time-boxed entry, $${launchAllocation.adjustedDepositUsd.toFixed(0)}`,
                   positionSizeUsd: launchAllocation.adjustedDepositUsd,
                   positionMode: "launch",
                 });
@@ -13619,8 +13688,8 @@ export const program = Effect.gen(function* () {
                   config.entryMomentumConfBoost,
                 ),
                 reasoning: enterSize.halved
-                  ? `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)} [jev-stress-halve stress=${enterSize.stress.toFixed(2)}]`
-                  : `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)}`,
+                  ? `[normal-enter] Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)} [jev-stress-halve stress=${enterSize.stress.toFixed(2)}]`
+                  : `[normal-enter] Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)}`,
                 positionSizeUsd,
                 ...resolveTpLadderSpread(tpLadder),
               });
@@ -14621,6 +14690,26 @@ export const program = Effect.gen(function* () {
               const budgetHuman = entrySolBudgetKnown
                 ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
                 : "unknown";
+              // Minimal-capital operation: a qualifying entry is not skipped just
+              // because the wallet is short — shrink it to fit the free SOL (never
+              // below the $10 floor). Smaller sizes only relax the downstream risk
+              // caps; the exact estimate is re-checked after the shrink.
+              const resized = entrySolBudgetKnown
+                ? resizeEnterToFreeSol({
+                    desiredSizeUsd: entrySizeUsd,
+                    freeSolLamports: entrySolBudgetLamports,
+                    solPriceUsd: entrySolPriceUsd,
+                    poolHasSolLeg: hasNativeSolLeg(pool),
+                  })
+                : null;
+              if (resized !== null) {
+                decision.positionSizeUsd = resized.sizeUsd;
+                entrySolBudgetLamports -= resized.lamports;
+                console.info(
+                  `[wallet-reserve] resized ${poolAddress} $${entrySizeUsd.toFixed(2)} -> $${resized.sizeUsd.toFixed(2)} to fit free SOL ${budgetHuman}`,
+                );
+                return null;
+              }
               const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
               const reason = `[wallet-reserve] free SOL ${budgetHuman} < needed ${neededHuman} — entry skipped (capacity-limited, not an error)`;
               yield* audit
@@ -15476,6 +15565,7 @@ export const program = Effect.gen(function* () {
             halt: null,
             safetyRejected,
             metrics,
+            poolFacts: assemblePoolFacts({ pool, metrics }),
             quality,
             pool,
             binArray,

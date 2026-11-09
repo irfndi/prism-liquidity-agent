@@ -2,7 +2,7 @@
 
 ## Observed deployment and results
 
-Read-only inspection of `217.216.35.77` on September 5, 2026:
+Read-only inspection of `<production-host>` on September 5, 2026:
 
 - Production: root user service `prism-agent.service`, active, working directory `/root/.prism`; health endpoint reports `0.2.36`. `PAPER_TRADING=false`.
 - Production ledger: `/root/.local/share/prism/prism.db`. Snapshot writes were current at inspection; the service is scanning, despite the lack of recent closes.

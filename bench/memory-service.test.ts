@@ -10,7 +10,7 @@ import { DbService, MemoryService } from "../engine/services.js";
 import type { MemoryCategory } from "../engine/types.js";
 
 // ─── Fallback embeddings ONLY ────────────────────────────────────────────────
-// The ONNX backend (@xenova/transformers) downloads an ~80MB model and crashes
+// The ONNX backend (@huggingface/transformers) downloads an ~80MB model and crashes
 // under Node's BigInt serialization; `engine/embeddings.ts` selects the backend
 // from `process.env.EMBEDDINGS_BACKEND` at call time and uses the deterministic
 // fallback for ANY value other than "onnx". Pin "fallback" so this suite NEVER

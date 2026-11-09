@@ -426,7 +426,9 @@ describe("live wallet-read entry gate", () => {
     });
     return Effect.runPromise(
       // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
+      asOwner<Effect.Effect<{ decisions: FullDecision[] }, Error, never>>(
+        Effect.provide(test, layer),
+      ),
     );
   }
 
@@ -554,7 +556,9 @@ describe("live wallet-read entry gate", () => {
 
     const { decisions } = await Effect.runPromise(
       // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
+      asOwner<Effect.Effect<{ decisions: FullDecision[] }, Error, never>>(
+        Effect.provide(test, layer),
+      ),
     );
 
     const exit = decisions.find((d) => d.poolAddress === EXIT_POOL && d.action === "EXIT");
@@ -650,11 +654,9 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
     });
     return Effect.runPromise(
       // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<
-        { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<{ decisions: FullDecision[]; snapshot: PrismStateSnapshot }, Error, never>
+      >(Effect.provide(test, layer)),
     );
   }
 
@@ -769,7 +771,9 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
     });
     return Effect.runPromise(
       // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
+      asOwner<Effect.Effect<{ decisions: FullDecision[] }, Error, never>>(
+        Effect.provide(test, layer),
+      ),
     );
   }
 
@@ -920,7 +924,9 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
     });
     const { decisions } = await Effect.runPromise(
       // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
+      asOwner<Effect.Effect<{ decisions: FullDecision[] }, Error, never>>(
+        Effect.provide(test, layer),
+      ),
     );
 
     expect(
@@ -1029,11 +1035,9 @@ describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
     });
     const { decisions, snapshot } = await Effect.runPromise(
       // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<
-        { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<{ decisions: FullDecision[]; snapshot: PrismStateSnapshot }, Error, never>
+      >(Effect.provide(test, layer)),
     );
 
     expect(

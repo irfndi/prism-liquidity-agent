@@ -127,7 +127,7 @@ These are used when developing Prism itself:
 ```bash
 bun run dev        # Start agent with hot reload
 bun run test       # Run Vitest suite
-bun run lint       # Run oxlint + tsc --noEmit
+bun run lint       # Run oxlint + tsrs --noEmit --fast
 bun run format     # Run oxfmt
 bun run build      # Build with tsdown
 bun run backtest   # Historical simulation
