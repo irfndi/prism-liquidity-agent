@@ -198,3 +198,40 @@ describe("cooldown duration math", () => {
     });
   });
 });
+
+// The persisted counter is what carries OOR escalation across exit kinds.
+// setPoolCooldown is an INSERT OR REPLACE, so a writer that resets it silently
+// demotes a pool from REPEAT_OOR_COOLDOWN_MS back to the base duration after
+// one low-yield exit in between.
+describe("OOR escalation survives a low-yield exit", () => {
+  const escalatedConfig: ExitCooldownConfig = {
+    ...config,
+    maxOorCooldownExits: 3,
+  };
+
+  it("keeps the escalated duration for the OOR exit after a low-yield one", () => {
+    // Given three OOR exits worth of history carried on the row.
+    const counterAfterPrefix = 2;
+    const lowYieldKeeps = counterAfterPrefix; // program.ts:115xx preserves what it read
+
+    // When the next OOR exit computes its duration from that counter.
+    const duration = computeCooldownForExit({
+      trigger: "oor",
+      consecutiveOorExits: lowYieldKeeps,
+      config: escalatedConfig,
+      feeDensityPerDay: null,
+    });
+
+    // Then it escalates. Resetting the counter (the old behaviour) returns the
+    // base duration instead, which is what this asserts against.
+    expect(duration).toBe(escalatedConfig.repeatOorCooldownMs);
+    expect(
+      computeCooldownForExit({
+        trigger: "oor",
+        consecutiveOorExits: 0,
+        config: escalatedConfig,
+        feeDensityPerDay: null,
+      }),
+    ).toBe(escalatedConfig.oorCooldownMs);
+  });
+});

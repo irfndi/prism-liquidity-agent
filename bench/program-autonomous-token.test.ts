@@ -13,7 +13,9 @@ import {
   decayExecutionFailureCounter,
   shouldAutoResolveDailyDrawdownPause,
   shouldAutoResolveExecutionFailuresPause,
+  shouldAutoResolveCoreDataPause,
   shouldTriggerSafetyPause,
+  persistSweptSettlementJobs,
   sweepOrphanSettlements,
 } from "../engine/autonomous-runtime.js";
 import { SOL_MINT } from "../engine/constants.js";
@@ -318,6 +320,61 @@ describe("autonomous token runtime policy", () => {
     ).toBe(false);
   });
 
+  it("auto-resolves a latched core_data_unavailable pause only on proven recovery", () => {
+    // Given a recovered cycle (counter reset, pools actually scanned).
+    // Then the latch clears — it has no other resolver, so without this it
+    // blocked ENTER/REBALANCE until `prism resume`.
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "live",
+        consecutiveCoreDataFailures: 0,
+        poolsScannedThisCycle: 12,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "canary",
+        consecutiveCoreDataFailures: 1,
+        poolsScannedThisCycle: 3,
+      }),
+    ).toBe(true);
+
+    // Shadow is informational only — never latches.
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "shadow",
+        consecutiveCoreDataFailures: 9,
+        poolsScannedThisCycle: 0,
+      }),
+    ).toBe(true);
+
+    // The pause stays latched while the breach stands.
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "live",
+        consecutiveCoreDataFailures: 2,
+        poolsScannedThisCycle: 12,
+      }),
+    ).toBe(false);
+
+    // An empty scan set proves nothing: a counter of 0 there is
+    // "no pools to fail", not "data came back" — stay latched.
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "live",
+        consecutiveCoreDataFailures: 0,
+        poolsScannedThisCycle: 0,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoResolveCoreDataPause({
+        mode: "canary",
+        consecutiveCoreDataFailures: 0,
+        poolsScannedThisCycle: 0,
+      }),
+    ).toBe(false);
+  });
+
   it("a quiet cycle decays the failure counter so a stale breach cannot re-arm (issue #182 review)", () => {
     // Cycle N: a spike of 3 execution failures arms the pause.
     let counter = decayExecutionFailureCounter(3, 3);
@@ -499,6 +556,46 @@ describe("autonomous token runtime policy", () => {
       nextRetryAt: 50_000, // past
     });
     expect(oldestActiveSettlementAgeMs([backingOff, pastRetry], 100_000)).toBe(99_999);
+  });
+
+  it("counts a retry-forever job past its own window as stuck (the 4.2 signal)", () => {
+    // Given a transient failure that keeps rescheduling: `retryableJob` never
+    // terminalizes a transient error, so this job's nextRetryAt is always in
+    // the future and it sat past its expires_at. It can no longer settle, and
+    // the position it belongs to is already closed with a NULL realized PnL —
+    // the operator has to see it.
+    const retryForever = settlementJob({
+      id: "settlement-429-forever",
+      status: "retryable",
+      createdAt: 1,
+      expiresAt: 1_000, // window = 999ms
+      attempts: 40,
+      nextRetryAt: 500_000, // still scheduling retries
+    });
+    expect(oldestActiveSettlementAgeMs([retryForever], 100_000, 999)).toBe(99_999);
+
+    // The #196 guarantee still holds inside the window: a job with a scheduled
+    // retry that is still within its max-pending window stays excused.
+    const stillInside = settlementJob({
+      id: "settlement-inside",
+      status: "retryable",
+      createdAt: 99_000,
+      expiresAt: 3_600_000,
+      nextRetryAt: 200_000,
+    });
+    expect(oldestActiveSettlementAgeMs([stillInside], 100_000, 3_600_000)).toBe(0);
+
+    // Confirmed and terminal jobs never count, however old.
+    expect(
+      oldestActiveSettlementAgeMs(
+        [
+          settlementJob({ status: "confirmed", createdAt: 1, confirmedOutputAtomic: "1" }),
+          settlementJob({ status: "terminal", createdAt: 1 }),
+        ],
+        100_000,
+        999,
+      ),
+    ).toBe(0);
   });
 
   it("subtracts settlement and execution costs from realized PnL", () => {
@@ -1895,6 +1992,34 @@ describe("issue #166 settlement recovery", () => {
       }),
     );
     expect(noDustGate.map((job) => job.tokenMint)).toEqual(["unpriceable-1"]);
+  });
+
+  it("processes only swept jobs the database accepted (unpersisted sales are skipped)", async () => {
+    // Given two swept jobs where the DB rejects the second write (SQLITE_BUSY,
+    // disk full). Processing it anyway would sell the tokens with no durable
+    // row, and the next sweep cannot re-enqueue them — the balance is gone.
+    const saved: string[] = [];
+    const db = makeDb({
+      saveSettlementJob: (job: SettlementJobRecord) =>
+        job.tokenMint === "rejected-mint"
+          ? Effect.fail(new Error("SQLITE_BUSY"))
+          : Effect.sync(() => {
+              saved.push(job.id);
+            }),
+    });
+
+    // When
+    const persisted = await Effect.runPromise(
+      persistSweptSettlementJobs(db, [
+        settlementJob({ id: "kept", tokenMint: "kept-mint" }),
+        settlementJob({ id: "dropped", tokenMint: "rejected-mint" }),
+      ]),
+    );
+
+    // Then only the durable job reaches the processor, so the rejected mint
+    // keeps its wallet balance for a clean retry next cycle.
+    expect(persisted.map((job) => job.id)).toEqual(["kept"]);
+    expect(saved).toEqual(["kept"]);
   });
 
   it("sweeps wallet holdings against position legs and active jobs, re-enqueuing terminal-mint tokens", async () => {

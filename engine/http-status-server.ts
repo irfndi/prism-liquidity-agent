@@ -7,7 +7,7 @@ import type { AppConfig } from "./config-service.js";
 import type { PrismStateSnapshot } from "./state-service.js";
 import type { AgentProposal } from "./types.js";
 import type { JsonValue } from "./services.js";
-import { parseHttpQueueProposal, ProposalParseError } from "./proposal-schema.js";
+import { parseHttpQueueProposal, isProposalStale, ProposalParseError } from "./proposal-schema.js";
 import { getCurrentVersion } from "./version.js";
 
 const logger = createLogger("HttpStatusServer");
@@ -507,11 +507,46 @@ export class HttpStatusServer {
       return Response.json({ error: "Proposal IDs not found", missing }, { status: 404 });
     }
 
+    const scopeError = this.approveScopeError(snapshot, ids, Date.now());
+    if (scopeError) return scopeError;
+
     for (const proposalId of ids) {
       await Effect.runPromise(this.state.approveProposal(proposalId));
     }
 
     return Response.json({ approved: ids.length }, { status: 200 });
+  }
+
+  /**
+   * Refuses an approval whose evidence no longer holds.
+   *
+   * Approval authorises ONE decision at ONE point in time, so it must not
+   * outlive that context: a proposal past its own TTL or
+   * AGENT_PROPOSAL_STALE_MS can no longer be executed meaningfully, and
+   * approving it would let an operator bless evidence they never saw.
+   *
+   * Deliberately NOT pool-scoped: the enqueue side already restricts proposals
+   * to the watchlist + held pools, and market-scan pools rotate out of the
+   * active set every refresh — re-checking membership here would reject a
+   * legitimate approval for a pool that merely stopped qualifying between
+   * propose and approve.
+   */
+  private approveScopeError(
+    snapshot: PrismStateSnapshot,
+    ids: readonly string[],
+    now: number,
+  ): Response | null {
+    const byId = new Map(snapshot.pendingProposals.map((p) => [p.proposalId, p]));
+    const stale = ids.filter((id) => {
+      const proposal = byId.get(id);
+      return (
+        proposal === undefined || isProposalStale(proposal, this.config.agentProposalStaleMs, now)
+      );
+    });
+    if (stale.length > 0) {
+      return Response.json({ error: "Proposals are stale", stale }, { status: 409 });
+    }
+    return null;
   }
 
   /** Loopback read endpoints (GET-style JSON views). Returns null when the
