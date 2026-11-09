@@ -1433,6 +1433,12 @@ export const DbLive = (dbPath?: string) =>
                 realized_pnl_usd = excluded.realized_pnl_usd,
                 expires_at = excluded.expires_at,
                 error = excluded.error,
+                -- created_at is the window start the overdue check measures
+                -- from. Every caller preserves it except nextOrphanSweepJob,
+                -- which revives a terminal job as a NEW attempt generation and
+                -- stamps a fresh one; without this the revival only lived in
+                -- memory and the next cycle reloaded the stale timestamp.
+                created_at = excluded.created_at,
                 updated_at = excluded.updated_at`,
               job.id,
               job.walletAddress,

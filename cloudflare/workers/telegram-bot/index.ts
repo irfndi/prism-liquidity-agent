@@ -712,16 +712,20 @@ app.post("/internal/flush-alerts", async (c) => {
       // Deploy-window straggler: a flush still running the OLD worker code
       // during the migration writes delivered_at = 'claim:...' without the new
       // columns. That row is invisible to both the pending and the claimed
-      // query, so it would never be delivered again. Migrations are applied
-      // before the new worker is deployed, so this only ever matches rows
-      // written in that gap; treat them as interrupted claims and release them
-      // (without charging an attempt).
+      // query, so it would never be delivered again. Only release claims that
+      // are already STALE — an old worker may have claimed the row seconds ago
+      // and still be sending it, and releasing that would let this flush send
+      // the same alert concurrently. The legacy token embeds a ms epoch, so the
+      // cutoff is like-with-like.
       yield* Effect.tryPromise(() =>
         c.env.DB.prepare(
           `UPDATE alerts
            SET delivered_at = NULL
-           WHERE delivered_at LIKE 'claim:%'`,
-        ).all(),
+           WHERE delivered_at LIKE 'claim:%'
+             AND CAST(substr(delivered_at, 7) AS INTEGER) < ?`,
+        )
+          .bind(Date.now() - CLAIM_RECLAIM_MS)
+          .all(),
       );
 
       // Reclaim stale claims first: a flush that crashed after its claim
