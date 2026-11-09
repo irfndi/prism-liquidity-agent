@@ -1,0 +1,5 @@
+{"kind":"skip","at":"2026-11-09T06:58:58.147Z","phase":"edit","sessionId":"01a1b6d2-a417-7785-9bd3-098b2b4a173c","reason":"diff too large to compute in time","files":["engine/program.ts"]}
+{"kind":"skip","at":"2026-11-09T06:59:31.762Z","phase":"edit","sessionId":"01a1b6d2-a417-7785-9bd3-098b2b4a173c","reason":"diff too large to compute in time","files":["engine/program.ts"]}
+{"kind":"skip","at":"2026-11-09T06:59:57.002Z","phase":"edit","sessionId":"01a1b6d2-a417-7785-9bd3-098b2b4a173c","reason":"diff too large to compute in time","files":["engine/program.ts"]}
+{"kind":"check","at":"2026-11-09T07:02:02.185Z","phase":"edit","sessionId":"01a1b6d2-a417-7785-9bd3-098b2b4a173c","promptId":"66f02c9b","files":["bench/issue-232-paper-mark-refresh.test.ts"],"rules":0,"latencyMs":12,"modelLatencyMs":0,"usage":{},"verdicts":[],"blocked":false}
+{"kind":"check","at":"2026-11-09T07:02:39.866Z","phase":"edit","sessionId":"01a1b6d2-a417-7785-9bd3-098b2b4a173c","promptId":"66f02c9b","files":["bench/issue-232-paper-mark-refresh.test.ts"],"rules":0,"latencyMs":9,"modelLatencyMs":0,"usage":{},"verdicts":[],"blocked":false}

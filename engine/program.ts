@@ -10220,7 +10220,15 @@ export const program = Effect.gen(function* () {
     // oxlint-disable-next-line complexity -- decision-loop orchestration intentionally keeps all gates in one ordered effect.
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
-      const entryGates = yield* runPoolEntryGates();
+      // Issue #232: position maintenance is independent of entry eligibility.
+      // The gate phase (pool state + datapi metrics) throws for a pool whose
+      // fetch fails — a delisted pool 404s on every cycle — and this generator
+      // used to abort before OOR tracking and the value mark ran, freezing
+      // `out_of_range_since` and `current_value_usd` at entry values. Those
+      // positions then reported a stale unrealized PnL and sat outside every
+      // risk gate that reads those fields (trailing stop, IL dominance,
+      // max-age, fee starvation). See runEntryGatesWithPositionMaintenance.
+      const entryGates = yield* runEntryGatesWithPositionMaintenance();
       if (entryGates.halt) return entryGates.halt;
       const metrics = entryGates.metrics;
       const { warnings, hasRecentWarning, entryEligible } = entryGates.quality;
@@ -10259,7 +10267,10 @@ export const program = Effect.gen(function* () {
 
       // OOR tracking must run before EXIT conditions so that out-of-range
       // cycle counts accumulate even when fee/IL triggers an EXIT.
-      function trackPositionRange(pos: PositionRecord): Effect.Effect<void, never> {
+      function trackPositionRange(
+        pos: PositionRecord,
+        pool: PoolState,
+      ): Effect.Effect<void, never> {
         return Effect.gen(function* () {
           const inRange = pool.activeBinId >= pos.lowerBinId && pool.activeBinId <= pos.upperBinId;
           if (!inRange) {
@@ -10363,7 +10374,10 @@ export const program = Effect.gen(function* () {
       // when entry legs are unknown), HODL-anchored for live. Paper
       // notional-fee accrual books Data-API-measured CLAIM income only — never
       // modeled or fabricated fees.
-      function refreshPositionValue(pos: PositionRecord): Effect.Effect<void, never> {
+      function refreshPositionValue(
+        pos: PositionRecord,
+        pool: PoolState,
+      ): Effect.Effect<void, never> {
         return Effect.gen(function* () {
           const realMark =
             pos.positionPubKey != null && adapter.getPositionValueUsd != null
@@ -10458,6 +10472,54 @@ export const program = Effect.gen(function* () {
           yield* accruePaperPositionFees();
           yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
         });
+      }
+
+      /**
+       * Best-effort OOR + mark refresh for held positions when the gate phase
+       * failed (issue #232). Deliberately independent of the datapi/metrics
+       * pipeline: a minimal pool read supplies everything both trackers need.
+       * Every failure is logged and swallowed, and the previous marks are left
+       * in place — a stale mark is recoverable, a fabricated one is not.
+       */
+      function maintainHeldPositionsAfterGateFailure(gateError: Error): Effect.Effect<void, never> {
+        return Effect.gen(function* () {
+          const held = positionsForPool(trackedPositions, poolAddress);
+          if (held.length === 0) return;
+          logger.warn("Entry gates failed — refreshing held position marks independently", {
+            pool: poolAddress,
+            positions: held.length,
+            error: gateError.message,
+          });
+          const poolState = yield* adapter.getPoolState(poolAddress, { skipStats: true }).pipe(
+            Effect.catch((err) => {
+              // Nothing to refresh from. Leave prior OOR/mark state untouched.
+              logger.warn("Held-position refresh skipped — pool state unavailable", {
+                pool: poolAddress,
+                error: err instanceof Error ? err.message : String(err),
+              });
+              return Effect.succeed(null);
+            }),
+          );
+          if (poolState === null) return;
+          for (const pos of held) {
+            yield* trackPositionRange(pos, poolState).pipe(Effect.catch(() => Effect.void));
+            yield* refreshPositionValue(pos, poolState).pipe(Effect.catch(() => Effect.void));
+          }
+        });
+      }
+
+      /**
+       * The gate phase, with issue #232's maintenance fallback. On failure the
+       * held-position refresh runs first and the error is then re-raised, so
+       * the pool's failure accounting (poolsFailed, coreDataFailuresThisCycle)
+       * and the caller's catch behave exactly as before.
+       */
+      function runEntryGatesWithPositionMaintenance() {
+        return runPoolEntryGates().pipe(
+          Effect.catch((err) =>
+            maintainHeldPositionsAfterGateFailure(err).pipe(Effect.andThen(Effect.fail(err))),
+          ),
+        );
       }
 
       // Launch peak-fee pruning (Launch Mode v2): drop entries whose position
@@ -11269,7 +11331,7 @@ export const program = Effect.gen(function* () {
       // OOR tracking must run before EXIT conditions so that out-of-range
       // cycle counts accumulate even when fee/IL triggers an EXIT.
       for (const pos of poolPositions) {
-        yield* trackPositionRange(pos);
+        yield* trackPositionRange(pos, pool);
       }
 
       // Per-cycle external-close reconcile: one position fetch per pool,
@@ -11373,7 +11435,7 @@ export const program = Effect.gen(function* () {
       // getPositionValueUsd is optional in the service contract (test mocks)
       // and never fails — null falls through to the price-anchored mark.
       for (const pos of poolPositions) {
-        yield* refreshPositionValue(pos);
+        yield* refreshPositionValue(pos, pool);
       }
       // Hot-window exits must see the range/value state refreshed above. The
       // earlier gate pass only admits the lane; evaluating it before refresh
