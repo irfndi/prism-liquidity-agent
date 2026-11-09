@@ -2,6 +2,18 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.44] — 2026-11-09
+
+### Fixed
+
+- **Held positions keep current OOR and mark state when a pool's gate phase fails (#232, #233).** A pool whose stats resolution threw (adapter reserve/price reads, delisted pool) aborted the whole `evaluatePool` before OOR tracking and the value mark ran, leaving positions frozen at entry values: `out_of_range_since` `null`, `current_value_usd` at the deposit, and every gate that reads them (trailing stop, IL dominance, max-age, fee starvation) blind. The failure is now branched instead of propagated: held positions are refreshed from a minimal `getPoolState(..., { skipStats: true })` read, then the original error is re-raised so failure accounting is unchanged. **Protective exit checks do not run on this error path** — they resume once the pool reads cleanly; the refresh keeps the state those checks depend on current, rather than evaluating them against a failed read. If even that read fails the prior marks are kept — a stale mark is recoverable, a fabricated one is not.
+- **Cooldown escalation survives a low-yield exit.** The low-yield branch wrote `consecutive_oor_exits = 0` through an `INSERT OR REPLACE`, wiping a pool's OOR history so one fee/IL exit between OOR exits reset `REPEAT_OOR_COOLDOWN_MS` to the base duration. The decision now lives in `nextOorExitCount` and preserves the counter.
+- **Candidate lifecycle can leave `entered`.** The discovery pass only emits `scan`, which `transitionCandidate` ignores for `entered` rows, so a close through reconcile, an empty reap or a paper exit left the candidate `entered` forever while `findEligibleAutonomousCandidateId` still reported it. A new `entry_closed` event moves it to `cooling_down` with the normal re-entry cooldown. `rejected` — previously unreachable — is now written for the Data-API blacklist, the one verdict no configuration can rehabilitate (config-dependent gates stay re-evaluable).
+- **Settlement bookkeeping.** A swept job whose row failed to persist was still processed, selling tokens with no durable record; only accepted rows are processed now. A job that retries past its max-pending window reaches the `settlement_overdue` signal instead of looping invisibly, and a revived terminal job stamps a fresh, persisted window rather than reporting as hours stale.
+- **Safety pauses resolve.** `core_data_unavailable` had no resolver, so one all-pools-failed cycle blocked ENTER/REBALANCE until `prism resume`; it now auto-resolves on the first fully clean cycle, and a discovery-empty cycle (which returns before the cycle tail) can finally reach the breaker. `isSafetyPauseArmed` also returned the opposite of its name.
+- **Agent approvals are time-bounded on both surfaces.** `/approve` and the MCP `prism_approve_proposals` tool refuse stale proposals instead of approving evidence the decision loop then skips.
+- **Alert delivery state is explicit.** `alerts.delivered_at` held `NULL`, the claim token and the delivery timestamp at once (migration `0017` adds `claim_token` + `claimed_at`); a reclaimed claim no longer charges a delivery attempt, and mid-deploy legacy claims are released only once stale, which reduces the risk of duplicate sends from an in-flight legacy flush (a send that outlives the reclaim window can still be duplicated).
+
 ## [0.2.43] — 2026-09-15
 
 ### Fixed
