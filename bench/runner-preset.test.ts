@@ -21,6 +21,11 @@ function facts(overrides: Partial<RunnerPoolFacts> = {}): RunnerPoolFacts {
 }
 
 describe("runner preset — scanner", () => {
+  it("rejects a pool with no liquidity denominator", () => {
+    expect(assessRunnerPool(facts({ tvlUsd: 0 })).reasons).toContain("tvl-unavailable");
+    expect(assessRunnerPool(facts({ tvlUsd: -1 })).qualifies).toBe(false);
+  });
+
   it("qualifies a pool printing >= 0.6% fee/TVL over 30m on a coarse bin step", () => {
     expect(assessRunnerPool(facts())).toEqual({ qualifies: true, reasons: [] });
     // Exactly at both floors is a pass: the thresholds are floors, not limits.
@@ -118,6 +123,17 @@ describe("runner preset — below-market split entry", () => {
     expect(plan.legs[0]?.sizeUsd).toBe(50.5);
     expect(plan.legs[1]?.sizeUsd).toBe(50.5);
     expect(plan.legs.reduce((sum, leg) => sum + leg.sizeUsd, 0)).toBe(101);
+  });
+
+  it("preserves a sub-cent size exactly instead of rounding it away", () => {
+    const plan = planRunnerEntry({
+      binStep: 100,
+      sizeUsd: 100.001,
+      maxHalfWidthBins: 50,
+      baseHalfWidthBins: 20,
+    });
+    // Rounding the remainder would have allocated 100.000.
+    expect(plan.legs.reduce((sum, leg) => sum + leg.sizeUsd, 0)).toBeCloseTo(100.001, 9);
   });
 
   it("clamps the half-width to the operator cap and never below one bin", () => {

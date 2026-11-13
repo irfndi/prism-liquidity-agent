@@ -93,7 +93,8 @@ export type RunnerRejectReason =
   | "fee-tvl-30m-below-floor"
   | "bin-step-below-floor"
   | "fee-turnover-inflated"
-  | "volume-turnover-too-low";
+  | "volume-turnover-too-low"
+  | "tvl-unavailable";
 
 export interface RunnerPoolVerdict {
   /** True only when every measurable condition passes. */
@@ -146,7 +147,11 @@ function filterReasons(
   config: RunnerPresetConfig,
 ): ReadonlyArray<RunnerRejectReason> {
   const reasons: RunnerRejectReason[] = [];
-  if (facts.tvlUsd > 0 && Number.isFinite(facts.volume24hUsd)) {
+  // No liquidity denominator means the turnover and fee-rate guards cannot be
+  // evaluated at all — reject rather than pass on the scanner conditions alone.
+  if (!(facts.tvlUsd > 0) || !Number.isFinite(facts.tvlUsd)) {
+    reasons.push("tvl-unavailable");
+  } else if (Number.isFinite(facts.volume24hUsd)) {
     if (facts.volume24hUsd / facts.tvlUsd < config.minTurnover) {
       reasons.push("volume-turnover-too-low");
     }
@@ -201,13 +206,16 @@ export function planRunnerEntry(input: RunnerEntryPlanInput): RunnerEntryPlan {
       Math.max(1, Math.floor(input.maxHalfWidthBins)),
     ),
   );
+  // Round ONLY the spot leg; the bid-ask leg takes the exact remainder so the
+  // two always sum to the requested size. Rounding both would drop (or add) up
+  // to half a cent per entry — 100.001 would silently allocate 100.000.
   const spotUsd = Math.round(input.sizeUsd * spotShare * 100) / 100;
   return {
     dipOffsetBins: dipOffsetBins(input.binStep, dipPct),
     halfWidthBins: halfWidth,
     legs: [
       { leg: "spot", sizeUsd: spotUsd },
-      { leg: "bidask", sizeUsd: Math.round((input.sizeUsd - spotUsd) * 100) / 100 },
+      { leg: "bidask", sizeUsd: input.sizeUsd - spotUsd },
     ],
   };
 }
