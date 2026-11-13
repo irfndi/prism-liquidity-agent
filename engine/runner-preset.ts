@@ -209,13 +209,18 @@ export function planRunnerEntry(input: RunnerEntryPlanInput): RunnerEntryPlan {
   // Round ONLY the spot leg; the bid-ask leg takes the exact remainder so the
   // two always sum to the requested size. Rounding both would drop (or add) up
   // to half a cent per entry — 100.001 would silently allocate 100.000.
-  const spotUsd = Math.round(input.sizeUsd * spotShare * 100) / 100;
+  // Clamp to the budget: rounding a full-share split UP (1.006 -> 1.01) would
+  // otherwise leave a negative remainder for the bid-ask leg.
+  const spotUsd = Math.min(
+    Math.max(input.sizeUsd, 0),
+    Math.round(Math.max(input.sizeUsd, 0) * spotShare * 100) / 100,
+  );
   return {
     dipOffsetBins: dipOffsetBins(input.binStep, dipPct),
     halfWidthBins: halfWidth,
     legs: [
       { leg: "spot", sizeUsd: spotUsd },
-      { leg: "bidask", sizeUsd: input.sizeUsd - spotUsd },
+      { leg: "bidask", sizeUsd: Math.max(0, input.sizeUsd - spotUsd) },
     ],
   };
 }

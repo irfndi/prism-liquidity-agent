@@ -119,6 +119,8 @@ describe("runner preset — below-market split entry", () => {
       maxHalfWidthBins: 50,
       baseHalfWidthBins: 20,
     });
+    // A centred plan is not this strategy: the dip anchor must be real.
+    expect(plan.dipOffsetBins).toBeGreaterThan(0);
     expect(plan.legs.map((leg) => leg.leg)).toEqual(["spot", "bidask"]);
     expect(plan.legs[0]?.sizeUsd).toBe(50.5);
     expect(plan.legs[1]?.sizeUsd).toBe(50.5);
@@ -134,6 +136,19 @@ describe("runner preset — below-market split entry", () => {
     });
     // Rounding the remainder would have allocated 100.000.
     expect(plan.legs.reduce((sum, leg) => sum + leg.sizeUsd, 0)).toBeCloseTo(100.001, 9);
+  });
+
+  it("never allocates a negative leg when rounding a full share up", () => {
+    const plan = planRunnerEntry({
+      binStep: 100,
+      sizeUsd: 1.006,
+      spotShare: 1,
+      maxHalfWidthBins: 50,
+      baseHalfWidthBins: 20,
+    });
+    expect(plan.legs[0]?.sizeUsd).toBeLessThanOrEqual(1.006);
+    expect(plan.legs[1]?.sizeUsd).toBeGreaterThanOrEqual(0);
+    expect(plan.legs.reduce((sum, leg) => sum + leg.sizeUsd, 0)).toBeCloseTo(1.006, 9);
   });
 
   it("clamps the half-width to the operator cap and never below one bin", () => {
