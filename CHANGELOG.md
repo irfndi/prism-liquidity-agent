@@ -2,6 +2,19 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.45] — 2026-11-10
+
+### Added
+
+- **30-minute fee/TVL window.** The Meteora Data API publishes `fee_tvl_ratio` and `fees` for 30m, 1h, 2h, 4h, 12h and 24h; Prism only read the last three, so the shortest window was dropped in parsing. `MeteoraPoolStats` now carries 30m/2h/4h (null when a window is absent).
+- **Hot-runner preset policy (`engine/runner-preset.ts`, pure).** The "30m printing pool" strategy as testable policy: a 30m fee/TVL floor (0.6%), a coarse bin-step floor (80), a fee-turnover guard (booked fees must be explainable by traded volume) and a turnover floor; a below-market split entry (dip converted to whole bins, 50:50 spot/bid-ask); 5-bin re-anchor cadence; and an ordered exit policy (emergency TP +10% → out-of-range → TP → break-even floor +0.1%).
+- **Opt-in gate wiring (`RUNNER_PRESET_ENABLED`, default false).** When enabled, market admission additionally runs the preset filter using the pool's own 30m window from the discovery payload — no extra fetch. With it off, selection is byte-identical to before.
+
+### Notes
+
+- Only the scanner half is wired. The execution half — two-leg below-market entry, the re-anchor loop, and the exit policy — is not wired yet; those functions remain pure. USDC settlement is additionally blocked on schema (`settlement_jobs.destination_asset` is CHECK-constrained to `'SOL'`).
+- The break-even floor is a **price** floor, not a PnL guarantee: LP inventory effects and execution costs can still close a position slightly negative at entry +0.1%.
+
 ## [0.2.44] — 2026-11-09
 
 ### Fixed
