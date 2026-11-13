@@ -15,7 +15,10 @@ const MAX_RETRIES = 2;
 interface RawWindowMap {
   readonly "24h": unknown;
   readonly "12h": unknown;
+  readonly "4h": unknown;
+  readonly "2h": unknown;
   readonly "1h": unknown;
+  readonly "30m": unknown;
 }
 
 interface RawDatapiToken {
@@ -155,7 +158,10 @@ export function parseMeteoraPoolStats<T>(raw: T): MeteoraPoolStats | null {
     currentPrice: readNumber(report.current_price) ?? 0,
     feeTvlRatio24h: readWindow(report.fee_tvl_ratio, "24h"),
     feeTvlRatio12h: readWindow(report.fee_tvl_ratio, "12h"),
+    feeTvlRatio4h: readWindow(report.fee_tvl_ratio, "4h"),
+    feeTvlRatio2h: readWindow(report.fee_tvl_ratio, "2h"),
     feeTvlRatio1h: readWindow(report.fee_tvl_ratio, "1h"),
+    feeTvlRatio30m: readWindow(report.fee_tvl_ratio, "30m"),
     dynamicFeePct: readNumber(report.dynamic_fee_pct),
     baseFeePct: readDatapiBaseFeePct(report),
     hasFarm: readBoolean(report.has_farm),
