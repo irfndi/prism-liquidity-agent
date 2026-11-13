@@ -643,7 +643,15 @@ export interface MeteoraPoolStats {
   readonly currentPrice: number;
   readonly feeTvlRatio24h: number | null;
   readonly feeTvlRatio12h: number | null;
+  readonly feeTvlRatio4h: number | null;
+  readonly feeTvlRatio2h: number | null;
   readonly feeTvlRatio1h: number | null;
+  /**
+   * Live fee/TVL over the last 30 minutes, as a PERCENT (the Data API's own
+   * unit for `fee_tvl_ratio`). The hot-pool scanners key on this window: a
+   * pool printing here is earning now, not over a day.
+   */
+  readonly feeTvlRatio30m: number | null;
   readonly dynamicFeePct: number | null;
   readonly baseFeePct: number | null;
   readonly hasFarm: boolean | null;
