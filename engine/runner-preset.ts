@@ -198,29 +198,26 @@ export interface RunnerEntryPlan {
  */
 export function planRunnerEntry(input: RunnerEntryPlanInput): RunnerEntryPlan {
   const dipPct = input.dipPct ?? RUNNER_PRESET_ENTRY_DIP_PCT;
-  const spotShare = Math.min(Math.max(input.spotShare ?? RUNNER_PRESET_SPOT_SHARE, 0), 1);
-  const halfWidth = Math.max(
-    1,
-    Math.min(
-      Math.floor(Number.isFinite(input.baseHalfWidthBins) ? input.baseHalfWidthBins : 1),
-      Math.max(1, Math.floor(input.maxHalfWidthBins)),
-    ),
-  );
-  // Round ONLY the spot leg; the bid-ask leg takes the exact remainder so the
-  // two always sum to the requested size. Rounding both would drop (or add) up
-  // to half a cent per entry — 100.001 would silently allocate 100.000.
-  // Clamp to the budget: rounding a full-share split UP (1.006 -> 1.01) would
-  // otherwise leave a negative remainder for the bid-ask leg.
-  const spotUsd = Math.min(
-    Math.max(input.sizeUsd, 0),
-    Math.round(Math.max(input.sizeUsd, 0) * spotShare * 100) / 100,
-  );
+  const dipOffset = dipOffsetBins(input.binStep, dipPct);
+  // Fail closed on non-finite inputs rather than propagating NaN into a plan.
+  const sizeUsd = Number.isFinite(input.sizeUsd) ? Math.max(input.sizeUsd, 0) : 0;
+  const rawShare = input.spotShare ?? RUNNER_PRESET_SPOT_SHARE;
+  const spotShare = Number.isFinite(rawShare) ? Math.min(Math.max(rawShare, 0), 1) : 0;
+  const cap = Number.isFinite(input.maxHalfWidthBins) ? Math.floor(input.maxHalfWidthBins) : 1;
+  const base = Number.isFinite(input.baseHalfWidthBins) ? Math.floor(input.baseHalfWidthBins) : 1;
+  const widthCap = Math.max(1, cap);
+  // A below-market ladder whose range reaches ABOVE the active bin is not a
+  // ladder: part of it would fill at entry. The half-width is therefore capped
+  // by the dip offset as well as the operator cap.
+  const belowMarketCap = dipOffset > 0 ? dipOffset : widthCap;
+  const halfWidth = Math.max(1, Math.min(Math.max(1, base), widthCap, belowMarketCap));
+  const spotUsd = Math.min(sizeUsd, Math.round(sizeUsd * spotShare * 100) / 100);
   return {
-    dipOffsetBins: dipOffsetBins(input.binStep, dipPct),
+    dipOffsetBins: dipOffset,
     halfWidthBins: halfWidth,
     legs: [
       { leg: "spot", sizeUsd: spotUsd },
-      { leg: "bidask", sizeUsd: Math.max(0, input.sizeUsd - spotUsd) },
+      { leg: "bidask", sizeUsd: Math.max(0, sizeUsd - spotUsd) },
     ],
   };
 }
@@ -321,7 +318,10 @@ const RATIO_EPSILON = 1e-9;
 
 export function evaluateRunnerExit(input: RunnerExitInput): RunnerExitVerdict {
   if (!usablePrice(input.entryPrice) || !Number.isFinite(input.currentPrice)) {
-    return { reason: null, pnlPct: 0 };
+    // No price means no PnL comparison, but the RANGE verdict is still known:
+    // an out-of-range position must be recycled even when the mark is
+    // unusable, otherwise a stale price silently suspends the OOR guard.
+    return { reason: input.inRange ? null : "out-of-range", pnlPct: 0 };
   }
   const pnlPct = (input.currentPrice - input.entryPrice) / input.entryPrice;
   return { reason: firstExitReason(input, pnlPct), pnlPct };

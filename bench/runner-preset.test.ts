@@ -151,6 +151,31 @@ describe("runner preset — below-market split entry", () => {
     expect(plan.legs.reduce((sum, leg) => sum + leg.sizeUsd, 0)).toBeCloseTo(1.006, 9);
   });
 
+  it("keeps the whole range below the active bin", () => {
+    // A half-width wider than the dip would put part of the ladder above
+    // market, where it fills immediately instead of on a dip.
+    const plan = planRunnerEntry({
+      binStep: 100,
+      sizeUsd: 100,
+      maxHalfWidthBins: 200,
+      baseHalfWidthBins: 200,
+    });
+    expect(plan.dipOffsetBins).toBe(70);
+    expect(plan.halfWidthBins).toBeLessThanOrEqual(plan.dipOffsetBins);
+  });
+
+  it("fails closed on non-finite split inputs", () => {
+    const plan = planRunnerEntry({
+      binStep: 100,
+      sizeUsd: Number.NaN,
+      maxHalfWidthBins: Number.NaN,
+      baseHalfWidthBins: Number.NaN,
+    });
+    expect(plan.halfWidthBins).toBeGreaterThanOrEqual(1);
+    expect(plan.legs.every((leg) => Number.isFinite(leg.sizeUsd))).toBe(true);
+    expect(plan.legs.reduce((sum, leg) => sum + leg.sizeUsd, 0)).toBe(0);
+  });
+
   it("clamps the half-width to the operator cap and never below one bin", () => {
     expect(
       planRunnerEntry({ binStep: 100, sizeUsd: 10, maxHalfWidthBins: 15, baseHalfWidthBins: 40 })
@@ -210,6 +235,16 @@ describe("runner preset — exit precedence", () => {
     expect(evaluateRunnerExit({ ...base, currentPrice: 100.1 }).reason).toBe("break-even");
     // Below the floor it keeps running.
     expect(evaluateRunnerExit({ ...base, currentPrice: 100.05 }).reason).toBeNull();
+  });
+
+  it("still recycles an out-of-range position when the price mark is unusable", () => {
+    // A stale mark must not suspend the OOR guard.
+    expect(evaluateRunnerExit({ entryPrice: 100, currentPrice: 0, inRange: false }).reason).toBe(
+      "out-of-range",
+    );
+    expect(
+      evaluateRunnerExit({ entryPrice: 100, currentPrice: 0, inRange: true }).reason,
+    ).toBeNull();
   });
 
   it("holds when price is below the floor and still in range", () => {
