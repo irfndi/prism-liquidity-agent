@@ -221,6 +221,12 @@ export interface AppConfig {
    */
   readonly marketScanMajorMinFeeApr?: number;
   readonly marketScanRunnerEnabled?: boolean;
+  /**
+   * Opt-in hot-runner preset: the market gate additionally requires a live
+   * 30m fee/TVL window, a coarse bin step, plausible fee-to-volume and real
+   * turnover. Off by default — enabling it changes which pools are selected.
+   */
+  readonly runnerPresetEnabled?: boolean;
   readonly marketScanRunnerMinFeeApr?: number;
   /** Minimum net active-bin drift (bins) for runner admission. A runner whose
    *  drift sits below this floor is a sustained decliner, not a dip — reject
@@ -1997,6 +2003,10 @@ const loadConfig = Effect.gen(function* () {
   // holds HIGH-YIELD pools rather than flat majors. Rotation exits the lowest-
   // APR held position when the portfolio is full and a much hotter runner is
   // available. OFF by default; paper-first.
+  const runnerPresetEnabled = yield* Config.boolean("RUNNER_PRESET_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+
   const marketScanRunnerEnabled = yield* Config.boolean("MARKET_SCAN_RUNNER_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
@@ -2488,6 +2498,7 @@ const loadConfig = Effect.gen(function* () {
     marketScanMinFeeApr,
     marketScanMajorMinFeeApr,
     marketScanRunnerEnabled,
+    runnerPresetEnabled,
     marketScanRunnerMinFeeApr,
     marketScanRunnerMinDriftBins,
     marketScanRotationEnabled,

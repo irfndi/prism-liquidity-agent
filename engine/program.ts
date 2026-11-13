@@ -258,6 +258,12 @@ import {
 } from "./autonomous-runtime.js";
 import { routeProbeAmountAtomic } from "./route-probe.js";
 import {
+  RUNNER_PRESET_DEFAULTS,
+  RUNNER_PRESET_MAX_EFFECTIVE_FEE_RATE,
+  RUNNER_PRESET_MIN_BIN_STEP,
+  RUNNER_PRESET_MIN_FEE_TVL_30M_PCT,
+} from "./runner-preset.js";
+import {
   estimateEntrySolLamports,
   freeEntrySolLamports,
   hasNativeSolLeg,
@@ -4133,6 +4139,18 @@ function resolveMarketScanConfig(config: AppConfig) {
     minBinStep: config.marketScanMinBinStep ?? 2,
     maxBinStep: config.marketScanMaxBinStep ?? 200,
     stablecoinMints: config.stablecoinMints ?? new Set<string>(),
+    // Opt-in: without RUNNER_PRESET_ENABLED the gate is absent and selection
+    // is byte-identical to before this feature.
+    ...(config.runnerPresetEnabled === true
+      ? {
+          runnerPreset: {
+            minFeeTvl30mPct: RUNNER_PRESET_MIN_FEE_TVL_30M_PCT,
+            minBinStep: RUNNER_PRESET_MIN_BIN_STEP,
+            maxEffectiveFeeRate: RUNNER_PRESET_MAX_EFFECTIVE_FEE_RATE,
+            minTurnover: RUNNER_PRESET_DEFAULTS.minTurnover,
+          },
+        }
+      : undefined),
   };
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { gateAndRankMarketPools, runnerPresetReject } from "../engine/market-gate.js";
 import {
   assessRunnerPool,
   dipOffsetBins,
@@ -256,5 +257,81 @@ describe("runner preset — exit precedence", () => {
       reason: null,
       pnlPct: 0,
     });
+  });
+});
+
+describe("runner preset — market gate wiring", () => {
+  const preset = {
+    minFeeTvl30mPct: 0.6,
+    minBinStep: 80,
+    maxEffectiveFeeRate: 0.05,
+    minTurnover: 0.02,
+  };
+
+  type Discovered = Parameters<typeof runnerPresetReject>[0];
+
+  interface DiscoveredOverrides {
+    readonly binStep?: number;
+    readonly window30m?: number;
+    /** Simulate a payload that carries no 30m window at all. */
+    readonly missingWindow?: boolean;
+  }
+
+  function discovered(overrides: DiscoveredOverrides = {}): Discovered {
+    const base: Discovered = {
+      address: "PoolRunner1111111111111111111111111111111111",
+      tvlUsd: 200_000,
+      volume24hUsd: 60_000,
+      fees24hUsd: 600,
+      apr: 100,
+      binStep: overrides.binStep ?? 100,
+      tokenX: "So11111111111111111111111111111111111111112",
+      tokenY: "RunnerToken11111111111111111111111111111111",
+      feeYieldWindows: overrides.missingWindow ? {} : { "30m": overrides.window30m ?? 0.9 },
+    };
+    return base;
+  }
+
+  it("is a no-op when the preset is not configured", () => {
+    expect(runnerPresetReject(discovered({ binStep: 5 }), undefined)).toBeNull();
+  });
+
+  it("admits a pool that clears the 30m window and bin step", () => {
+    expect(runnerPresetReject(discovered(), preset)).toBeNull();
+  });
+
+  it("rejects a pool with no 30m window in the payload", () => {
+    expect(runnerPresetReject(discovered({ missingWindow: true }), preset)).toBe(
+      "[runner-preset] fee-tvl-30m-unknown",
+    );
+  });
+
+  it("rejects a pool below the 30m floor or the bin-step floor", () => {
+    expect(runnerPresetReject(discovered({ window30m: 0.2 }), preset)).toContain(
+      "fee-tvl-30m-below-floor",
+    );
+    expect(runnerPresetReject(discovered({ binStep: 20 }), preset)).toContain(
+      "bin-step-below-floor",
+    );
+  });
+
+  it("leaves ranking untouched until the preset is enabled", () => {
+    const strict = discovered({ binStep: 20 });
+    const base = {
+      minTvlUsd: 0,
+      minFeeApr: 0,
+      minVolumeTurnover: 0,
+      maxVolumeTurnover: 100,
+      minHolders: 0,
+      minPoolAgeHours: 0,
+      minBinStep: 1,
+      maxBinStep: 500,
+      stablecoinMints: new Set<string>(),
+    };
+    // Without the preset the pool is admitted; with it, it is rejected.
+    expect(gateAndRankMarketPools([strict], base).ranked).toHaveLength(1);
+    const gated = gateAndRankMarketPools([strict], { ...base, runnerPreset: preset });
+    expect(gated.ranked).toHaveLength(0);
+    expect(gated.rejected[0]?.reason).toContain("bin-step-below-floor");
   });
 });

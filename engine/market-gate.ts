@@ -1,3 +1,4 @@
+import { assessRunnerPool } from "./runner-preset.js";
 /** @file Market-scan gate: turns a raw universe snapshot into a ranked,
  * IL-safe candidate set. Pure and unit-testable — no Effect, no network.
  *
@@ -50,6 +51,21 @@ export interface MarketGateConfig {
    * as false (`!== true`).
    */
   readonly allowTransferFeeTokens?: boolean;
+  /**
+   * Hot-runner preset admission (opt-in). When enabled, a pool must ALSO clear
+   * the 30-minute printing filter before it can be ranked: a live 30m fee/TVL
+   * above the floor, a coarse bin step, plausible fee-to-volume, and real
+   * turnover. Absent/false leaves selection exactly as it was.
+   */
+  readonly runnerPreset?: RunnerPresetGate | undefined;
+}
+
+/** The opt-in hot-runner admission filter, as the market gate consumes it. */
+export interface RunnerPresetGate {
+  readonly minFeeTvl30mPct: number;
+  readonly minBinStep: number;
+  readonly maxEffectiveFeeRate: number;
+  readonly minTurnover: number;
 }
 
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -413,6 +429,36 @@ function marketLegRejectReason(pool: DiscoveredPool, config: MarketGateConfig): 
 
 /** Gates and ranks one universe snapshot. Pure; callers feed it the adapter's
  *  `discoverPoolsTopPages` output. */
+/**
+ * Hot-runner admission: the measurable half of the "30m printing pool" screen.
+ *
+ * Reads the pool's own 30m window from the discovery payload, so this needs no
+ * extra fetch. Returns a rejection reason, or null when the pool clears (or
+ * the preset is not configured).
+ */
+export function runnerPresetReject(
+  pool: DiscoveredPool,
+  preset: RunnerPresetGate | undefined,
+): string | null {
+  if (preset === undefined) return null;
+  const verdict = assessRunnerPool(
+    {
+      feeTvlRatio30mPct: pool.feeYieldWindows?.["30m"] ?? null,
+      binStep: pool.binStep,
+      tvlUsd: pool.tvlUsd,
+      fees24hUsd: pool.fees24hUsd,
+      volume24hUsd: pool.volume24hUsd,
+    },
+    {
+      minFeeTvl30mPct: preset.minFeeTvl30mPct,
+      minBinStep: preset.minBinStep,
+      maxEffectiveFeeRate: preset.maxEffectiveFeeRate,
+      minTurnover: preset.minTurnover,
+    },
+  );
+  return verdict.qualifies ? null : `[runner-preset] ${verdict.reasons.join(",")}`;
+}
+
 export function gateAndRankMarketPools(
   pools: ReadonlyArray<DiscoveredPool>,
   config: MarketGateConfig,
@@ -421,9 +467,10 @@ export function gateAndRankMarketPools(
   const rejected: Array<{ readonly address: string; readonly reason: string }> = [];
 
   for (const pool of pools) {
-    const rejectReason = marketAdmissionReject(pool, config);
-    if (rejectReason !== null) {
-      rejected.push({ address: pool.address, reason: rejectReason });
+    const candidateReject =
+      marketAdmissionReject(pool, config) ?? runnerPresetReject(pool, config.runnerPreset);
+    if (candidateReject !== null) {
+      rejected.push({ address: pool.address, reason: candidateReject });
       continue;
     }
 
