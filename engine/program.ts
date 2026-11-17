@@ -3440,8 +3440,14 @@ function flagSettlementPersistenceFailure(
 }
 
 /**
- * Exit-sweep CLAIM events: pending-fee sweep and swept-reward rollup
- * (best-effort rows, delivery failures swallowed).
+ * Exit-sweep CLAIM events + the post-compute cumulatives credit.
+ *
+ * This is the path every autonomous EXIT takes and it never credited
+ * `cumulativeFeesClaimedUsd` / `cumulativeRewardsClaimedUsd`: live rows kept
+ * $0.00 lifetime fees across 82 swept closes, so `prism status`, fee APR and
+ * the IL-dominance fee leg all read zero. Called AFTER the realized
+ * computation — `withdrawnUsd` already contains the swept fees, so crediting
+ * first would count them twice.
  */
 function recordExitSweepEvents(
   deps: LiveExecDeps,
@@ -3454,6 +3460,7 @@ function recordExitSweepEvents(
   return Effect.gen(function* () {
     const pendingFeeUsd = exitResultData.pendingFeeUsd;
     if (pendingFeeUsd != null) {
+      pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
       yield* deps.db
         .savePositionEvent({
           id: randomUUID(),
@@ -3468,6 +3475,13 @@ function recordExitSweepEvents(
           createdAt: now,
         })
         .pipe(Effect.catch(() => Effect.void));
+    }
+    const credit = creditSweptRewards(pos, exitResultData.sweptRewards);
+    if (credit.unpricedReward) {
+      logger.warn("Exit sweep included an unpriceable LM reward — recorded with null USD", {
+        pool: decision.poolAddress,
+        position: pos.positionId,
+      });
     }
     if ((exitResultData.sweptRewards ?? []).length > 0) {
       yield* deps.db
@@ -3548,7 +3562,6 @@ function settleLiveExitAttribution(
         fatal: "Unable to persist all exit settlement jobs; reconciliation required",
       };
     }
-    yield* recordExitSweepEvents(deps, decision, pool, pos, exitResultData, now);
     const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
     const pricingUnresolved = withdrawnUsd === null;
     // Empty reap: the account held zero liquidity, so the booked deposit
@@ -3563,6 +3576,9 @@ function settleLiveExitAttribution(
             pos.depositedUsd,
             pos.cumulativeRewardsClaimedUsd,
           );
+    // Credit the sweep after the compute (see the helper): it is the only
+    // writer of the fee/reward cumulatives on this path.
+    yield* recordExitSweepEvents(deps, decision, pool, pos, exitResultData, now);
     yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
     yield* persist(
       `closePosition ${pos.positionId}`,

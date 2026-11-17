@@ -1467,6 +1467,8 @@ describe("live lifecycle PnL accounting", () => {
   async function runLiveExitScenario(options: {
     exit: ExitResult;
     seed?: (pos: PositionRecord) => void;
+    /** Route through the chain-attribution EXIT path (autonomous execution). */
+    attributed?: boolean;
     /** Live close-cost knobs (absent = 0, the pre-fix behavior). */
     costs?: {
       runnerSwapCostPct?: number;
@@ -1481,6 +1483,8 @@ describe("live lifecycle PnL accounting", () => {
       binStep: 10,
       tokenXSymbol: "SOL",
       tokenYSymbol: "USDC",
+      tokenX: "So11111111111111111111111111111111111111112",
+      tokenY: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       currentPrice: 100,
     };
     return runDb(
@@ -1495,6 +1499,17 @@ describe("live lifecycle PnL accounting", () => {
           entryPrep: liveEntryPrep,
           solPriceUsd: 150,
           entryStrategySpec: "spot" as const,
+          ...(options.attributed === true
+            ? {
+                autonomous: {
+                  mode: "live" as const,
+                  walletAddress: "Wallet111",
+                  agentInstanceId: "agent-test",
+                  settlementMaxPendingMs: 600_000,
+                  settlementDustUsd: 0.1,
+                },
+              }
+            : undefined),
           ...(options.costs ?? undefined),
         };
         const enter = yield* executeLive(
@@ -1689,6 +1704,36 @@ describe("live lifecycle PnL accounting", () => {
     )!;
     expect(rewardClaim).toBeDefined();
     expect(rewardClaim.valueUsd).toBeNull();
+  });
+
+  it("attributes the sweep credit on the autonomous EXIT path (fees + rewards land on the row)", async () => {
+    // Regression: the chain-attribution EXIT only wrote CLAIM events and never
+    // credited the position, so every autonomous close kept $0.00 lifetime
+    // fees (live: 82 swept closes, 0 credited) — which also zeroed the fee leg
+    // of IL-dominance and misreported IL as always dominant.
+    const outcome = await runLiveExitScenario({
+      attributed: true,
+      exit: exitResult({
+        withdrawnUsd: 1000,
+        withdrawnXAtomic: "5000000000",
+        pendingFeeYAtomic: "4000000", // 4 USDC swept at close
+        pendingFeeUsd: 3,
+        sweptRewards: [{ mint: "RewardMint111", amountAtomic: 2_000_000, amountUsd: 1.5 }],
+      }),
+    });
+
+    const closed = outcome.closed[0]!;
+    // The settled withdrawal is attributed to chain settlement jobs, so the
+    // exit's realized PnL stays n/a pending their confirmation — but the swept
+    // amounts are still credited exactly once for APR/display/IL-dominance.
+    expect(closed.realizedPnlUsd).toBeNull();
+    expect(closed.cumulativeFeesClaimedUsd).toBeCloseTo(3, 8);
+    expect(closed.cumulativeRewardsClaimedUsd).toBeCloseTo(1.5, 8);
+
+    const sweepClaim = outcome.events.find(
+      (e) => e.event === "CLAIM" && JSON.parse(e.metadata ?? "{}").kind === "exit_sweep",
+    )!;
+    expect(sweepClaim.feesUsd).toBeCloseTo(3, 8);
   });
 
   it("records NULL realized when exit pricing is unresolved, but still closes with raw amounts", async () => {
