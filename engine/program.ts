@@ -3492,6 +3492,29 @@ function recordExitSweepEvents(
   });
 }
 
+/** EXIT event metadata for the chain-attribution path (unpriced reaps flagged). */
+function attributedExitMetadata(
+  pos: PositionRecord,
+  exitResultData: LiveExitResultData,
+  decision: AgentDecision,
+  settlementPending: number,
+  pricingUnresolved: boolean,
+) {
+  const unpriced = exitResultData.isEmptyReap || pricingUnresolved;
+  return {
+    settlementPending,
+    txSignature: exitResultData.txSignature,
+    exitReason: decision.reasoning,
+    ...(unpriced
+      ? {
+          pricing: "unresolved" as const,
+          ...(exitResultData.isEmptyReap ? { emptyReap: true } : undefined),
+          lastMarkUsd: pos.currentValueUsd,
+        }
+      : undefined),
+  };
+}
+
 function settleLiveExitAttribution(
   deps: LiveExecDeps,
   decision: AgentDecision,
@@ -3528,9 +3551,11 @@ function settleLiveExitAttribution(
     yield* recordExitSweepEvents(deps, decision, pool, pos, exitResultData, now);
     const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
     const pricingUnresolved = withdrawnUsd === null;
-    const realizedPnlUsd = exitResultData.isEmptyReap
-      ? 0
-      : pricingUnresolved || attributable.length > 0
+    // Empty reap: the account held zero liquidity, so the booked deposit
+    // may never have landed. Booking 0 reads as a break-even close and hides
+    // the row from the rolling halt, the pool kill switch and history.
+    const realizedPnlUsd =
+      exitResultData.isEmptyReap || pricingUnresolved || attributable.length > 0
         ? null
         : computeRealizedPnlUsd(
             withdrawnUsd,
@@ -3565,11 +3590,13 @@ function settleLiveExitAttribution(
         valueUsd: exitResultData.withdrawnUsd ?? null,
         feesUsd: pos.cumulativeFeesClaimedUsd,
         price: pool.currentPrice,
-        metadata: {
-          settlementPending: attributable.length,
-          txSignature: exitResultData.txSignature,
-          exitReason: decision.reasoning,
-        },
+        metadata: attributedExitMetadata(
+          pos,
+          exitResultData,
+          decision,
+          attributable.length,
+          pricingUnresolved,
+        ),
         createdAt: now,
       })
       .pipe(Effect.catch(() => Effect.void));
@@ -3624,9 +3651,8 @@ function computeLedgerExitRealized(
   //    (exit swap, entry/exit gas, claim txs) debit the gross figure: they
   //    are spent on-chain but appear in no measured USD amount above.
   const modeledCostsUsd = isEmptyReap ? 0 : liveCloseCostsUsd(costs);
-  const realizedPnlUsd = isEmptyReap
-    ? 0
-    : pricingUnresolved
+  const realizedPnlUsd =
+    isEmptyReap || pricingUnresolved
       ? null
       : computeRealizedPnlUsd(
           withdrawnUsd,

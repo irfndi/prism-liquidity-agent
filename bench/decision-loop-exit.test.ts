@@ -1217,8 +1217,8 @@ describe("empty-position reap (zero-liquidity on-chain account)", () => {
     ).toBeDefined();
     expect(
       reaped!.realizedPnlUsd,
-      "an empty reap realizes 0, never the -deposited phantom loss",
-    ).toBe(0);
+      "an empty reap is n/a (null), never a break-even 0 that hides from the PnL breakers",
+    ).toBeNull();
     expect(rugBlock, "an empty reap must not rug-block the suspect token").toBeNull();
   }, 15_000);
 });
