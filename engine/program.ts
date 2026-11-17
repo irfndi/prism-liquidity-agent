@@ -3440,14 +3440,54 @@ function flagSettlementPersistenceFailure(
 }
 
 /**
+ * Credit one swept-fee claim: the cumulative, the fee_claims row when the
+ * atomics are known, and the mirrored CLAIM event either way.
+ *
+ * Lives on both EXIT paths: this one (autonomous, behind chain attribution)
+ * never credited the cumulatives nor booked a fee_claims row, so live rows
+ * kept $0.00 lifetime fees across 82 swept closes (last row 2026-09-07) while
+ * the events claimed otherwise — `prism status`, fee APR and the IL-dominance
+ * fee leg all read zero.
+ */
+function creditSweptFees(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  pool: LiveExecPool,
+  pos: PositionRecord,
+  exitResultData: LiveExitResultData,
+  now: number,
+): Effect.Effect<void, never> {
+  const pendingFeeUsd = exitResultData.pendingFeeUsd;
+  if (pendingFeeUsd == null) return Effect.void;
+  pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
+  const feeX = Number(exitResultData.pendingFeeXAtomic ?? "0");
+  const feeY = Number(exitResultData.pendingFeeYAtomic ?? "0");
+  if ((feeX > 0 || feeY > 0) && pos.positionPubKey != null) {
+    return recordExitSweepFeeClaim(deps, decision, pool, pos, pendingFeeUsd, feeX, feeY);
+  }
+  // Atomically unpriced sweep: the event is the only record that a claim
+  // happened alongside the close.
+  return deps.db
+    .savePositionEvent({
+      id: randomUUID(),
+      poolAddress: decision.poolAddress,
+      positionPubKey: pos.positionPubKey,
+      positionId: pos.positionId,
+      event: "CLAIM",
+      valueUsd: null,
+      feesUsd: pendingFeeUsd,
+      price: pool.currentPrice,
+      metadata: { kind: "exit_sweep" },
+      createdAt: now,
+    })
+    .pipe(Effect.catch(() => Effect.void));
+}
+
+/**
  * Exit-sweep CLAIM events + the post-compute cumulatives credit.
  *
- * This is the path every autonomous EXIT takes and it never credited
- * `cumulativeFeesClaimedUsd` / `cumulativeRewardsClaimedUsd`: live rows kept
- * $0.00 lifetime fees across 82 swept closes, so `prism status`, fee APR and
- * the IL-dominance fee leg all read zero. Called AFTER the realized
- * computation — `withdrawnUsd` already contains the swept fees, so crediting
- * first would count them twice.
+ * Called AFTER the realized computation — `withdrawnUsd` already contains the
+ * swept fees, so crediting first would count them twice.
  */
 function recordExitSweepEvents(
   deps: LiveExecDeps,
@@ -3458,24 +3498,7 @@ function recordExitSweepEvents(
   now: number,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
-    const pendingFeeUsd = exitResultData.pendingFeeUsd;
-    if (pendingFeeUsd != null) {
-      pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
-      yield* deps.db
-        .savePositionEvent({
-          id: randomUUID(),
-          poolAddress: decision.poolAddress,
-          positionPubKey: pos.positionPubKey,
-          positionId: pos.positionId,
-          event: "CLAIM",
-          valueUsd: null,
-          feesUsd: pendingFeeUsd,
-          price: pool.currentPrice,
-          metadata: { kind: "exit_sweep" },
-          createdAt: now,
-        })
-        .pipe(Effect.catch(() => Effect.void));
-    }
+    yield* creditSweptFees(deps, decision, pool, pos, exitResultData, now);
     const credit = creditSweptRewards(pos, exitResultData.sweptRewards);
     if (credit.unpricedReward) {
       logger.warn("Exit sweep included an unpriceable LM reward — recorded with null USD", {

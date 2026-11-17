@@ -1734,6 +1734,11 @@ describe("live lifecycle PnL accounting", () => {
       (e) => e.event === "CLAIM" && JSON.parse(e.metadata ?? "{}").kind === "exit_sweep",
     )!;
     expect(sweepClaim.feesUsd).toBeCloseTo(3, 8);
+
+    // The attributed path also books the fee_claims row (the ledger path
+    // always did): without it the sweep is visible in events but invisible to
+    // every fee-claims consumer, and the last live row was 2026-09-07.
+    expect(outcome.feeClaims.some((c) => c.txSignature?.startsWith("exit-sweep:"))).toBe(true);
   });
 
   it("records NULL realized when exit pricing is unresolved, but still closes with raw amounts", async () => {
