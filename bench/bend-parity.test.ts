@@ -475,6 +475,7 @@ describeIf("bend parity", () => {
       [1.2, 1],
       [1.2, 2],
       [1.25, 0],
+      [1.25, 1],
       [10, 0],
       // Absurd fees for the ceiling pin. Keep the magnitude small: Bend's Nat is
       // unary, and `toMilli(20_000)` is a 20-million-successor literal that times

@@ -120,7 +120,7 @@ echo "== TLA+ resilience model (must pass) =="
   tail -n 30 "$WORK/resilience-fixed.log"
   exit 1
 }
-echo "ok: ResilienceFixed retries only transient errors, bounds retries, and never strikes on a business error"
+echo "ok: ResilienceFixed retries only rate-limited errors, bounds retries, never opens on a rejected call, and never strikes a caller-side error"
 
 echo "== TLA+ buggy resilience model (must fail) =="
 set +e
@@ -131,9 +131,9 @@ if [ "$rc" -eq 0 ]; then
   echo "FAIL: the buggy resilience model passed — a business error opening the breaker is not detected"
   exit 1
 fi
-if ! grep -q "Invariant BusinessErrorDoesNotOpen is violated" "$WORK/resilience-buggy.log"; then
+if ! grep -q "Invariant LocalErrorDoesNotStrike is violated" "$WORK/resilience-buggy.log"; then
   echo "FAIL: the buggy resilience model failed for the wrong reason (exit $rc)"
   tail -n 30 "$WORK/resilience-buggy.log"
   exit 1
 fi
-echo "ok: buggy resilience strikes the breaker on a business error (the missing isRetriable defect)"
+echo "ok: buggy resilience lets a caller-side error strike the breaker (the missing isRetriable predicate)"

@@ -400,6 +400,9 @@ def L.confidence_sub_unit_momentum():
 def L.confidence_rounds_half_up():
   {==}
 
+def L.confidence_combined_rounding():
+  {==}
+
 def L.confidence_falling_no_lift():
   {==}
 

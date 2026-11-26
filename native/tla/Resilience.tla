@@ -1,18 +1,23 @@
 ---- MODULE Resilience ----
-\* Formal model of the RPC resilience POLICY in `engine/adapter-retry.ts`:
-\* bounded retry plus a circuit breaker.
+\* Formal model of the RPC resilience POLICY in `engine/adapter-retry.ts` and
+\* its wiring in `engine/adapter-service.ts` (`rpcCall`): bounded retry plus a
+\* circuit breaker.
 \*
-\* Two rules keep a flaky provider from costing money:
-\*   1. The breaker exists to stop spending requests on a dead ENDPOINT, so only
-\*      errors that say something about endpoint health may strike it.
-\*   2. The retry loop exists to absorb a transient 429 or timeout, so only
-\*      those may be retried; a provider rejecting the REQUEST (400 "chain is
-\*      not available on free plan", a bad parameter, a validation failure) says
-\*      nothing about health and must fail immediately.
+\* The runtime classifies an error twice, and the two sets are NOT the same:
 \*
-\* Mixing the two is the defect this model pins down: a breaker that strikes on
-\* business errors opens on a caller's typo and then rejects every legitimate
-\* call, including the EXIT that protects capital.
+\*   - `isRpcNetworkError` decides a STRIKE. It covers HTTP 400-599, 429,
+\*     -32005, ECONN*/ETIMEDOUT, fetch failures and provider rejection messages.
+\*     A provider answering 400 "chain is not available on free plan" is an
+\*     endpoint failure by design: the caller rotates to the next endpoint.
+\*   - `isRetriableError` decides a RETRY. It is narrower: 429, -32005, rate
+\*     limit phrasing, and RPC timeouts. A 500 strikes the breaker but is not
+\*     retried on the same endpoint.
+\*
+\* Anything else (an argument validation error, a programming defect) is the
+\* caller's fault, not the endpoint's: it must not strike and must not retry.
+\* `CircuitBreaker.execute(effect)` called WITHOUT its `isRetriable` predicate
+\* would strike on exactly those, opening the breaker on a caller's typo and
+\* then rejecting the capital-protecting EXIT.
 \*
 \* The observation is enumerated exhaustively, like Policy.tla: every
 \* (breaker, trial, attempt, kind, strikes) input is explored from Init and the
@@ -26,29 +31,29 @@
 EXTENDS Naturals, TLC
 
 CONSTANTS
-  StrikeBusinessErrors,  \* the defect: let a business error strike the breaker
-  Threshold,             \* consecutive strikes that open the breaker
-  MaxRetries             \* retries allowed for one request
+  StrikeLocalErrors,  \* the defect: let a caller-side error strike the breaker
+  Threshold,          \* consecutive strikes that open the breaker
+  MaxRetries          \* retries allowed for one request
 
 VARIABLES
   breaker,   \* "closed" | "open" | "half"
   trial,     \* a HALF_OPEN probe is already in flight
   attempt,   \* retries already spent on this request
-  kind,      \* error carried by this observation: "none" | "transient" | "business"
+  kind,      \* "none" | "rate-limit" | "endpoint" | "local"
   strikes,   \* strikes recorded BEFORE this observation
   decision,  \* "call" | "retry" | "fail" | "reject-open" | "reject-trial"
   opens      \* this observation opens the breaker
 
 vars == <<breaker, trial, attempt, kind, strikes, decision, opens>>
 
-\* Retry is for transient transport failures only.
-Retriable == kind = "transient"
+\* Retry is for the rate-limited / timed-out class only (`isRetriableError`).
+Retriable == kind = "rate-limit"
 
-\* A strike is for endpoint health only. The defect widens this to business
-\* errors, which is `CircuitBreaker.execute(effect)` called without its
-\* `isRetriable` predicate.
+\* A strike is for endpoint health (`isRpcNetworkError`): rate limits, HTTP
+\* 4xx/5xx and transport failures. `local` is deliberately absent; the buggy
+\* configuration adds it.
 Strikable ==
-  kind = "transient" \/ (StrikeBusinessErrors /\ kind = "business")
+  kind \in {"rate-limit", "endpoint"} \/ (StrikeLocalErrors /\ kind = "local")
 
 StrikesAfter == IF Strikable THEN strikes + 1 ELSE strikes
 
@@ -75,7 +80,7 @@ Init ==
   /\ breaker \in {"closed", "open", "half"}
   /\ trial \in BOOLEAN
   /\ attempt \in 0..MaxRetries
-  /\ kind \in {"none", "transient", "business"}
+  /\ kind \in {"none", "rate-limit", "endpoint", "local"}
   /\ strikes \in 0..Threshold
   /\ decision = Decide
   /\ opens = OpensNow
@@ -104,14 +109,15 @@ HalfOpenSingleProbe == TrialRejects => decision = "reject-trial"
 RejectedNeverOpens ==
   (decision = "reject-open" \/ decision = "reject-trial") => ~opens
 
-\* 3. Only transient transport errors are retried.
-RetryOnlyTransient == decision = "retry" => kind = "transient"
+\* 4. Only the rate-limited class is retried. A 500 strikes but is not retried,
+\*    and a caller-side error is retried never.
+RetryOnlyRetriable == decision = "retry" => kind = "rate-limit"
 
-\* 4. Retries are bounded: the loop cannot run past its budget.
+\* 5. Retries are bounded: the loop cannot run past its budget.
 RetryBounded == decision = "retry" => attempt < MaxRetries
 
-\* 5. A business error never strikes the breaker. (The buggy config violates
-\*    this and only this, so the negative control's counterexample is stable.)
-BusinessErrorDoesNotOpen == kind = "business" => ~opens
+\* 6. A caller-side error never strikes the breaker. (The buggy configuration
+\*    violates this and only this, so the negative control is stable.)
+LocalErrorDoesNotStrike == kind = "local" => ~opens
 
 ====

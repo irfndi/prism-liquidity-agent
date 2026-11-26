@@ -17,9 +17,13 @@ on:
   workflow_dispatch:
 
 # A new commit makes the previous CI run worthless; kill it. Main pushes are
-# never cancelled: every merge must be able to publish its canary.
+# never cancelled AND never queued behind each other: `cancel-in-progress:
+# false` still lets GitHub drop an older PENDING run when a third arrives
+# (the default single pending slot), which would skip a canary for that merge.
+# A per-run group on pushes removes the queue entirely; PRs keep one shared
+# group so superseding works.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name != 'pull_request' && github.run_id || 'pr' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only token: the build job needs no write scope (checkout uses

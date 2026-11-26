@@ -413,6 +413,12 @@ law confidence_sub_unit_momentum:
 law confidence_rounds_half_up:
   {K.normal_conf_milli(1200n, False{}, 1n, 20n, 50n) == 563n : Nat}
 
+# Contributions are combined BEFORE the single rounding: feeIl 1.25 (0.0625) plus
+# 1 bin of drift (0.0025) is 0.565 exactly. Rounding each half up first gave
+# 0.063 + 0.003 = 0.566 and broke parity with `normalEntryConfidence`.
+law confidence_combined_rounding:
+  {K.normal_conf_milli(1250n, False{}, 1n, 20n, 50n) == 565n : Nat}
+
 # The same pool falling keeps the static 0.560: no momentum credit.
 law confidence_falling_no_lift:
   {K.normal_conf_milli(1200n, True{}, 40n, 20n, 50n) == 560n : Nat}

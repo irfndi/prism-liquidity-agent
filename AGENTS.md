@@ -373,11 +373,12 @@ Veto-fetch failures log the underlying gateway error (Effect wraps rejections in
   (EXIT/HOLD/ROTATE decision table, 10,648 observations), `TaExhaustion.tla` (the TA gate's temporal
   contract: no unqualified loss close — a measured fee/IL above the floor is the only exception and
   the gate defaults off — plus the hold floor, honest-gate liveness, and a must-fail pre-#237
-  control), and `Resilience.tla` (RPC retry budget + circuit breaker: only transient errors strike,
-  retries are bounded, an open breaker never calls). Each has a fixed config that must pass and a
-  buggy config that must fail — the buggy configs are the regression each model exists for. Bend's
-  `Nat` is unary: keep kernel arithmetic in small units (hours, not seconds) or the prover will not
-  finish.
+  control), and `Resilience.tla` (the RPC retry budget + circuit breaker, matching the runtime's two
+  classifiers: `isRpcNetworkError` strikes on rate limits, HTTP 4xx/5xx and transport failures,
+  `isRetriableError` retries the rate-limited class only, a caller-side error does neither, and a
+  refused call never opens the breaker). Each has a fixed config that must pass and a buggy config
+  that must fail — the buggy configs are the regression each model exists for. Bend's `Nat` is unary:
+  keep kernel arithmetic in small units (hours, not seconds) or the prover will not finish.
 - Add a law/spec **before or with** a policy change, not after: the negative-control config is what
   proves the model still detects the failure it was written for.
 - Engine tests live in `bench/**/*.test.ts`. There is no `tests/` directory for the engine.

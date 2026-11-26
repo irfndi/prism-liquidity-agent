@@ -152,12 +152,14 @@ for (const tag of new Set([...dockerfile.matchAll(/FROM oven\/bun:([\w.-]+)/g)].
 // Every workflow installs Bun from its own `BUN_VERSION` env line. A CI-only
 // drift is invisible to the manifest and Dockerfile checks above, so read the
 // files themselves rather than trusting the diagnostic to be followed.
+//
+// The value may be quoted and may carry a trailing YAML comment
+// (`BUN_VERSION: "1.4.4" # pinned for CI`); both are valid YAML and both would
+// otherwise slip past an unquoted, end-of-line-anchored pattern.
 const workflowDir = join(root, ".github/workflows");
 for (const file of readdirSync(workflowDir).filter((entry) => entry.endsWith(".yml"))) {
   const text = readFileSync(join(workflowDir, file), "utf8");
-  // Quoted and unquoted YAML values are both valid; an unquoted-only pattern
-  // would silently skip `BUN_VERSION: "1.4.4"` and report success.
-  for (const match of text.matchAll(/^\s*BUN_VERSION:\s*["']?([\w.]+)["']?\s*$/gm)) {
+  for (const match of text.matchAll(/^\s*BUN_VERSION:\s*["']?([\w.]+)["']?\s*(?:#.*)?$/gm)) {
     check(
       `.github/workflows/${file}`,
       `workflow pins BUN_VERSION ${match[1] ?? "(empty)"} but packageManager pins bun@${managerVersion ?? "(unset)"}.`,

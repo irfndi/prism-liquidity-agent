@@ -413,17 +413,59 @@ def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Na
         case 1n+p:
           round_div(Nat.mul(Nat.min(drift, 1n+p), weight_milli), 1n+p)
 
-# normalEntryConfidence: min(0.500 + feeIlRatio x 0.05 + momentum, 0.850),
-# in thousandths. feeIl x 0.05 is `fee_il_milli / 20` (1200 / 20 = 60 = 0.060),
-# rounded the same way: 1.25 x 0.05 = 62.5 thousandths, and TS rounds to 63.
-def normal_conf_milli(+fee_il_milli: Nat, neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
+# normalEntryConfidence: min(0.500 + feeIlRatio x 0.05 + momentum, 0.850).
+#
+# The two contributions are combined BEFORE the single rounding. Rounding them
+# separately and adding made feeIl 1.25 with 1 bin of drift return 566 while
+# `normalEntryConfidence` returns 0.565: each half-up rounded up, and the
+# fractional part of the drift disappeared twice.
+#
+#   milli = 500 + (feeMilli x ref + clamp(drift, ref) x weightMilli x 20) / (20 x ref)
+#
+# `fee_il_milli` is clamped at 7000 (fee/IL 7.0) first: at 7.0 the fee term alone
+# is 0.350, so `500 + 350` is the 850 ceiling and momentum cannot matter.
+# Clamping keeps `Nat.mul` small — unary arithmetic, and 20_000 fee x 20
+# reference builds 400k nodes for a number the ceiling discards anyway.
+def conf_ceiling_fee_milli() -> Nat:
+  7000n
+
+def conf_flat(+fee_il_milli: Nat) -> Nat:
   Nat.min(
-    Nat.add(
-      Nat.add(500n, round_div(fee_il_milli, 20n)),
-      momentum_scaled(neg, drift, ref, weight_milli),
-    ),
+    Nat.add(500n, round_div(Nat.min(fee_il_milli, conf_ceiling_fee_milli()), 20n)),
     850n,
   )
+
+# NOTE on exact halves: this kernel rounds the exact rational. The TS reference
+# carries IEEE-754 error, so an input whose exact result sits on .5 can land
+# just below it in JS (`0 + 0.0025` is 0.0024999... there) and `Math.round`
+# floors it. Those inputs are excluded from the parity vectors on purpose; a
+# law cannot encode a floating-point representation choice, and the money-path
+# decisions this gate informs turn on 0.65, not on the last thousandth.
+
+# `neg` is matched before `ref`: Bend cannot match a binder that follows an
+# earlier match in the same definition.
+def normal_conf_milli(+fee_il_milli: Nat, neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
+  match neg:
+    case True{}:
+      conf_flat(fee_il_milli)
+    case False{}:
+      match ref:
+        case 0n:
+          conf_flat(fee_il_milli)
+        case 1n+r:
+          Nat.min(
+            Nat.add(
+              500n,
+              round_div(
+                Nat.add(
+                  Nat.mul(Nat.min(fee_il_milli, conf_ceiling_fee_milli()), 1n+r),
+                  Nat.mul(Nat.min(drift, 1n+r), Nat.mul(weight_milli, 20n)),
+                ),
+                Nat.mul(20n, 1n+r),
+              ),
+            ),
+            850n,
+          )
 
 # Evolution may move a threshold, but a hard safety floor still bounds it:
 # `evolveThresholds` clamps to the band, then the safety floor applies.
