@@ -5,8 +5,22 @@ on:
     branches:
       - main
       - master
+    # Docs-only pushes to main skip CI. Deliberately NOT on pull_request: a
+    # path-filtered required check never reports on a docs-only PR, so the PR
+    # sits "expected" and can never merge.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - "assets/**"
   pull_request:
   workflow_dispatch:
+
+# A new commit makes the previous CI run worthless; kill it. Main pushes are
+# never cancelled: every merge must be able to publish its canary.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only token: the build job needs no write scope (checkout uses
 # persist-credentials: false below), and a compromised step must not be able
@@ -19,11 +33,59 @@ permissions:
 # linker and shared global store. (Cloudflare R2 is deprecated for
 # distribution — account billing; releases publish to GitHub.)
 env:
-  BUN_VERSION: 1.4.2
+  BUN_VERSION: 1.4.5
 
 jobs:
-  build:
+  # Typecheck, lint, format and the toolchain matrix. Split from the tests so a
+  # lint failure reports while the suite is still running instead of
+  # serializing ~90 s of tests behind a ~20 s typecheck.
+  lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      # Lockfile-keyed: a dependency change invalidates it, a source change
+      # reuses the downloaded tarballs. The isolated linker keeps unpacked
+      # packages in the global store, so this cache is what makes `bun install`
+      # a link step instead of a download.
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate embedded sqlite-vec extension
+        run: bun run scripts/generate-vec-embed.ts linux x64
+
+      - name: Toolchain compatibility matrix
+        run: bun run check:toolchain
+
+      - name: Type check + lint
+        run: bun run lint
+
+      - name: Format check
+        run: bun run format:check
+
+  # The coverage gate (istanbul thresholds in vitest.config.ts). Sharding with
+  # coverage would need a blob merge for a ~45 s saving; the suite runs whole
+  # here and shards only in release.yml, where the threshold is not enforced.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       CI: true
       NODE_ENV: test
@@ -43,21 +105,54 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
         with:
-          node-version: 26
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Generate embedded sqlite-vec extension
         run: bun run scripts/generate-vec-embed.ts linux x64
 
-      - name: Type check
-        run: bun run lint
+      # Coverage was local-only; this also enforces the istanbul thresholds
+      # configured in vitest.config.ts so PRs can't silently regress them.
+      - name: Run tests with coverage gate
+        run: bun run coverage
 
-      - name: Build
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate embedded sqlite-vec extension
+        run: bun run scripts/generate-vec-embed.ts linux x64
+
+      - name: Build engine bundle
         run: bun run build
 
       # Smoke-test the shell wrapper (the package `bin` and primary user entry
@@ -72,22 +167,48 @@ jobs:
           scripts/prism.sh --version
           env -u HOME PATH="$PATH" scripts/prism.sh --version
 
+  # Compiled binaries are informational only (oven-sh/bun#42664 is open), and
+  # `bun build --compile` is the slowest step in the pipeline. Its own
+  # non-blocking job keeps it off the required critical path.
+  compiled-binaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate embedded sqlite-vec extension
+        run: bun run scripts/generate-vec-embed.ts linux x64
+
       # Compiled-binary gate: scripts/compile-binary.ts self-verifies every
       # build it produces (fails loud on the oven-sh/bun#42664 startup crash
       # instead of shipping a broken artifact). Runs on the linux-x64 runner
-      # (the only target it can smoke-test); skips cleanly elsewhere. Needs
-      # the CLI bundle first (tsdown.cli.config.ts) for the `prism` profile.
-      - name: Smoke test compiled binaries (informational — bun#42664 open)
-        continue-on-error: true
+      # (the only target it can smoke-test); skips cleanly elsewhere.
+      - name: Build and smoke-test compiled binaries
         run: |
           bunx --bun tsdown --config tsdown.cli.config.ts
           bun scripts/compile-binary.ts prism
           bun scripts/compile-binary.ts prismd
 
-      # Coverage was local-only; this also enforces the istanbul thresholds
-      # configured in vitest.config.ts so PRs can't silently regress them.
-      - name: Run tests with coverage gate
-        run: bun run coverage
   # Cloudflare worker suites (API route tests + Telegram bot) on
   # vitest-pool-workers, which simulates D1/KV/R2 locally — no Cloudflare
   # credentials needed. The root coverage gate only measures bench/** and
@@ -115,8 +236,16 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
         working-directory: cloudflare
 
       - name: Type check workers
@@ -133,8 +262,12 @@ jobs:
   # manifest.json upload lands last — that upload is the pointer flip. No GPG.
   canary-prepare:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
+    # Canary publishes only what the whole pipeline passed: lint and tests are
+    # separate jobs now, so both are explicit prerequisites (they used to run
+    # inside `build`).
+    needs: [lint, test, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Role-scoped group: prepare and publish must not share a group, or an
     # older run's publish can cancel a newer run's prepare mid-flight and
     # publish the older commit. Same-role jobs still supersede each other.
@@ -155,8 +288,16 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Compute canary version and build dir
         id: meta
@@ -193,6 +334,7 @@ jobs:
           - os: macos-latest
             platform-key: darwin-arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -209,8 +351,16 @@ jobs:
         with:
           node-version: 26
 
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Install platform sqlite-vec extension
         # bunfig's isolated linker + shared global store do not reliably
@@ -271,8 +421,16 @@ jobs:
         with:
           node-version: 26
 
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Download canary bundle artifacts
         uses: actions/download-artifact@v8
@@ -412,6 +570,7 @@ jobs:
   # what turns them from a no-op into a real gate.
   rust-host:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       BEND_NO_TELEMETRY: 1
     steps:
@@ -423,8 +582,24 @@ jobs:
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
 
+      # The cached ~/.bend freezes the prover version; bump the key to take a
+      # new Bend release so a drift in prover behaviour is a deliberate change.
+      - name: Cache Bend
+        uses: actions/cache@v4
+        with:
+          path: ~/.bend
+          key: ${{ runner.os }}-bend-2.0
+
       - name: Install Bend
-        run: curl -fsSL https://bend-lang.com/install.sh | sh
+        run: |
+          if [ ! -x "$HOME/.bend/bin/bend" ]; then
+            curl -fsSL https://bend-lang.com/install.sh | sh
+          fi
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/rust
 
       - name: Check formatting
         run: cargo +stable fmt --check --manifest-path native/rust/Cargo.toml
@@ -441,6 +616,7 @@ jobs:
   # pull by hand — the deploy itself stays manual (soak guard binds).
   prismd-binary:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -479,6 +655,7 @@ jobs:
   # quiet and offline-stable.
   bend-proof:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       BEND_NO_TELEMETRY: 1
     steps:
@@ -492,8 +669,18 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      # Same freeze as rust-host: bump the key to adopt a new Bend release.
+      - name: Cache Bend
+        uses: actions/cache@v4
+        with:
+          path: ~/.bend
+          key: ${{ runner.os }}-bend-2.0
+
       - name: Install Bend
-        run: curl -fsSL https://bend-lang.com/install.sh | sh
+        run: |
+          if [ ! -x "$HOME/.bend/bin/bend" ]; then
+            curl -fsSL https://bend-lang.com/install.sh | sh
+          fi
 
       - name: Run proof (expect 300n)
         run: |
@@ -501,3 +688,31 @@ jobs:
           command -v bend
           bend native/bend/PROOF.bend | tee /tmp/bend-proof.out
           grep -q 300n /tmp/bend-proof.out
+
+  # TLA+ gate: every fixed model must hold and every buggy model must FAIL —
+  # the negative controls are the point. Java and the digest-pinned
+  # tla2tools.jar are cached; tla-verify.sh re-verifies the digest each run, so
+  # a poisoned cache fails instead of executing.
+  tla-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache TLC
+        uses: actions/cache@v4
+        with:
+          path: native/tla/tla2tools.jar
+          key: ${{ runner.os }}-tla2tools-1.8.0
+
+      - name: Run TLA+ models
+        run: bash scripts/tla-verify.sh
