@@ -178,6 +178,38 @@ def L.entry_overhead_is_the_gap():
 def L.entry_overhead_never_negative():
   {==}
 
+# ── Selection + evolution (kernels appended 2026-11-26) ───────────────────
+
+def L.floor_inclusive_at_boundary():
+  {==}
+
+def L.floor_rejects_below():
+  {==}
+
+def L.relaxed_floor_keeps_admitted_pool():
+  {==}
+
+def L.tightened_floor_drops_pool():
+  {==}
+
+def L.capacity_bounded_by_top_k():
+  {==}
+
+def L.capacity_bounded_by_max_pools():
+  {==}
+
+def L.capacity_never_exceeds_universe():
+  {==}
+
+def L.hard_floor_survives_low_evolution():
+  {==}
+
+def L.hard_floor_survives_high_evolution():
+  {==}
+
+def L.hard_floor_at_exact_boundary():
+  {==}
+
 # Observable: the runaway pins to the ceiling.
 def main() -> Nat:
   K.clamp_thr(1392n, 30n, 300n)

@@ -164,3 +164,41 @@ law entry_overhead_is_the_gap:
 
 law entry_overhead_never_negative:
   {K.entry_overhead_c(2000n, 2749n) == 0n : Nat}
+
+# 9. Selection: an admission floor is inclusive at the boundary and strict
+# below it, and RELAXING a floor can never un-admit a pool that qualified.
+# (2026-11-26: absolute fees/volume floors of $3,000/$1M admitted 2 of 3,000
+# pools; the same gate at $300/$250k admits 43. The door, not the engine.)
+law floor_inclusive_at_boundary:
+  {K.pool_admitted(5000n, 5000n) == True{} : Bool}
+
+law floor_rejects_below:
+  {K.pool_admitted(4999n, 5000n) == False{} : Bool}
+
+law relaxed_floor_keeps_admitted_pool:
+  {K.pool_admitted(6000n, 300n) == True{} : Bool}
+
+law tightened_floor_drops_pool:
+  {K.pool_admitted(6000n, 7000n) == False{} : Bool}
+
+# 10. Capacity: the active scan set is bounded by TOP_K and MAX_POOLS no
+# matter how many pools rank. A rising universe must not silently widen the
+# cycle into an RPC bill.
+law capacity_bounded_by_top_k:
+  {K.active_count(500n, 40n, 80n) == 40n : Nat}
+
+law capacity_bounded_by_max_pools:
+  {K.active_count(500n, 100n, 80n) == 80n : Nat}
+
+law capacity_never_exceeds_universe:
+  {K.active_count(7n, 40n, 80n) == 7n : Nat}
+
+# 11. Evolution: a hard safety floor survives any evolved threshold.
+law hard_floor_survives_low_evolution:
+  {K.with_hard_floor(10n, 120n) == 120n : Nat}
+
+law hard_floor_survives_high_evolution:
+  {K.with_hard_floor(500n, 120n) == 500n : Nat}
+
+law hard_floor_at_exact_boundary:
+  {K.with_hard_floor(120n, 120n) == 120n : Nat}

@@ -232,5 +232,23 @@ def break_even_days(+cost_bps: Nat, +apr_bps: Nat) -> Nat:
 def entry_overhead_c(+spent_c: Nat, +deposit_c: Nat) -> Nat:
   Nat.sub(spent_c, deposit_c)
 
+# ── Selection + evolution ────────────────────────────────────────────────
+# The market gate is the door to every lane: a floor that rejects everything
+# silently turns the agent off, and a floor relaxed during tuning must never
+# un-admit a pool that already qualified. These kernels pin both directions.
+
+# One admission floor (TVL, fees24h, volume24h, holders all reduce to this).
+def pool_admitted(+value: Nat, +floor: Nat) -> Bool:
+  Nat.is_ge(value, floor)
+
+# How many pools actually get scanned: ranked ∩ TOP_K ∩ MAX_POOLS.
+def active_count(+ranked: Nat, +top_k: Nat, +max_pools: Nat) -> Nat:
+  Nat.min(Nat.min(ranked, top_k), max_pools)
+
+# Evolution may move a threshold, but a hard safety floor still bounds it:
+# `evolveThresholds` clamps to the band, then the safety floor applies.
+def with_hard_floor(+evolved: Nat, +hard_floor: Nat) -> Nat:
+  Nat.max(evolved, hard_floor)
+
 def main() -> Nat:
   clamp_thr(1392n, 30n, 300n)
