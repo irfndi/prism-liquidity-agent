@@ -120,7 +120,7 @@ echo "== TLA+ resilience model (must pass) =="
   tail -n 30 "$WORK/resilience-fixed.log"
   exit 1
 }
-echo "ok: ResilienceFixed retries only rate-limited errors, bounds retries, never opens on a rejected call, and never strikes a caller-side error"
+echo "ok: ResilienceFixed retries only rate-limited errors, bounds retries, never opens on a rejected call or an intermediate retry, and never strikes a caller-side error"
 
 echo "== TLA+ buggy resilience model (must fail) =="
 set +e

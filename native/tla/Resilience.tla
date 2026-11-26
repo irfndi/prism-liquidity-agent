@@ -74,7 +74,14 @@ Decide ==
 \* breaker feed itself.
 Admitted == Decide \notin {"reject-open", "reject-trial"}
 
-OpensNow == Admitted /\ Strikable /\ StrikesAfter >= Threshold
+\* Only a TERMINAL failure strikes. `rpcCall` runs `retryEffectWithBackoff`
+\* INSIDE `breaker.execute`, so the breaker observes the retry loop's outcome,
+\* not each attempt: an intermediate 429 that the next attempt survives calls
+\* `onSuccess` and resets the count. Opening on `retry` would model a breaker
+\* the runtime cannot produce.
+TerminalFailure == Decide = "fail"
+
+OpensNow == Admitted /\ TerminalFailure /\ Strikable /\ StrikesAfter >= Threshold
 
 Init ==
   /\ breaker \in {"closed", "open", "half"}
@@ -109,14 +116,18 @@ HalfOpenSingleProbe == TrialRejects => decision = "reject-trial"
 RejectedNeverOpens ==
   (decision = "reject-open" \/ decision = "reject-trial") => ~opens
 
-\* 4. Only the rate-limited class is retried. A 500 strikes but is not retried,
+\* 4. An intermediate retry cannot open it either: the breaker wraps the whole
+\*    retry loop, so a survived retry resets the count on success.
+RetryNeverOpens == decision = "retry" => ~opens
+
+\* 5. Only the rate-limited class is retried. A 500 strikes but is not retried,
 \*    and a caller-side error is retried never.
 RetryOnlyRetriable == decision = "retry" => kind = "rate-limit"
 
-\* 5. Retries are bounded: the loop cannot run past its budget.
+\* 6. Retries are bounded: the loop cannot run past its budget.
 RetryBounded == decision = "retry" => attempt < MaxRetries
 
-\* 6. A caller-side error never strikes the breaker. (The buggy configuration
+\* 7. A caller-side error never strikes the breaker. (The buggy configuration
 \*    violates this and only this, so the negative control is stable.)
 LocalErrorDoesNotStrike == kind = "local" => ~opens
 
