@@ -178,6 +178,126 @@ def L.entry_overhead_is_the_gap():
 def L.entry_overhead_never_negative():
   {==}
 
+# ── TA-exhaustion projected P&L + policy (#237) ───────────────────────────
+
+def L.ta_rebalance_absent_is_gain():
+  {==}
+
+def L.ta_rebalance_cost_flips_to_loss():
+  {==}
+
+def L.ta_pending_fees_flip_to_gain():
+  {==}
+
+def L.ta_pending_rewards_flip_to_gain():
+  {==}
+
+def L.ta_without_pending_is_loss():
+  {==}
+
+def L.ta_claimed_fees_and_rewards_credit():
+  {==}
+
+def L.ta_flat_net_is_no_loss():
+  {==}
+
+def L.ta_loss_label_never_profit(k):
+  match k:
+    case False{}:
+      {==}
+    case True{}:
+      {==}
+
+def L.ta_label_loss_is_losing():
+  {==}
+
+def L.ta_label_zero_loss_is_profit():
+  {==}
+
+def L.ta_label_unknown_is_unknown():
+  {==}
+
+def L.ta_known_requires_mark():
+  {==}
+
+def L.ta_known_requires_pending():
+  {==}
+
+def L.ta_known_requires_overhead():
+  {==}
+
+def L.ta_known_requires_net_amounts():
+  {==}
+
+def L.ta_known_when_all_present():
+  {==}
+
+def L.ta_nonnegative_zero_loss():
+  {==}
+
+def L.ta_loss_is_never_nonnegative(k):
+  match k:
+    case False{}:
+      {==}
+    case True{}:
+      {==}
+
+def L.ta_gate_off_never_blocks(r):
+  match r:
+    case False{}:
+      {==}
+    case True{}:
+      {==}
+
+def L.ta_gate_nonnegative_passes_without_ratio():
+  {==}
+
+def L.ta_gate_loss_ratio_at_floor_passes():
+  {==}
+
+def L.ta_gate_loss_ratio_below_floor_fails():
+  {==}
+
+def L.ta_gate_unknown_ratio_equals_nonnegative(n):
+  match n:
+    case False{}:
+      {==}
+    case True{}:
+      {==}
+
+def L.ta_hold_disabled_passes():
+  {==}
+
+def L.ta_hold_at_floor_passes():
+  {==}
+
+def L.ta_hold_below_floor_blocks():
+  {==}
+
+def L.ta_rsi_strictly_above_trips():
+  {==}
+
+def L.ta_rsi_at_threshold_holds():
+  {==}
+
+def L.ta_rsi_threshold_100_never_trips():
+  {==}
+
+def L.ta_vote_all_gates_fire():
+  {==}
+
+def L.ta_vote_disabled_quiet():
+  {==}
+
+def L.ta_vote_hold_gate_quiet():
+  {==}
+
+def L.ta_vote_confluence_quiet():
+  {==}
+
+def L.ta_vote_pnl_gate_quiet():
+  {==}
+
 # ── Dynamic hold (kernels appended 2026-11-26) ────────────────────────────
 
 def L.hold_break_even_exact():

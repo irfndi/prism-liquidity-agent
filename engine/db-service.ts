@@ -42,6 +42,14 @@ export interface PositionRecord {
   positionPubKey: string | null;
   depositedUsd: number;
   currentValueUsd: number;
+  /**
+   * Runtime-only provenance for currentValueUsd, stamped by the per-cycle
+   * value refresh: true when the mark values the holdings a close would
+   * withdraw (the live on-chain position value, or the paper CLMM/settlement
+   * mark). False for a live fallback (HODL/deposit) — P&L-gated rules must
+   * treat that as unknown. Not persisted.
+   */
+  valueMarkKnown?: boolean;
   tokenXSymbol: string;
   tokenYSymbol: string;
   activeBinId: number;

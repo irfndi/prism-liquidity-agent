@@ -4,9 +4,8 @@
 #   1. typecheck + lint + format   — the code is well-formed
 #   2. unit/property tests         — the accounting identities hold
 #   3. Bend proofs                 — the PnL/strategy laws are proved, not sampled
-#   4. TLA+ (fixed model)          — every invariant holds and the halt arms
-#   5. TLA+ (buggy model)          — MUST fail, proving the model detects the
-#                                    regression it was written for
+#   4. TLA+ (fixed models)         — ledger + TA-exhaustion invariants/liveness hold
+#   5. TLA+ (buggy models)         — MUST fail, proving each model detects its regression
 #
 # Step 5 is the negative control. A verification suite that cannot fail is
 # decoration; it is checked on every run, by construction.
