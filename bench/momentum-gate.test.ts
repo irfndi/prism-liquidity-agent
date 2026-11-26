@@ -256,17 +256,33 @@ describe("drift gate in the decision loop", () => {
       const blockExpiresAt = Date.now() + 2_000; // 2s remaining
       yield* db.setMetadata(`token_block:${TOKEN_A}`, String(blockExpiresAt));
       yield* db.setMetadata(`token_block:${TOKEN_B}`, String(blockExpiresAt));
-      yield* Effect.raceFirst(program, Effect.sleep(8_000)); // wide window: parallel-load flake guard (real-clock expiry)
       const audit = yield* AuditService;
-      const decisions = yield* audit.getRecentDecisions(300);
-      return asOwner<
-        ReadonlyArray<{
-          action: string;
-          reasoning: string;
-          executed: boolean;
-          poolAddress: string;
-        }>
-      >(decisions);
+      // Wait for the EVENT, not the clock. A fixed race window made this test
+      // fail on any loaded machine: the block is real-time while cycle
+      // throughput collapses under 16-way file parallelism, so 8s could yield
+      // exactly one scan cycle (2 token-block decisions) and no drift verdict.
+      // Polling the audit trail succeeds as soon as the rejection lands and
+      // fails with what was actually observed otherwise.
+      const waitForDriftRejection = Effect.gen(function* () {
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const decisions = yield* audit.getRecentDecisions(300);
+          if (decisions.some((d) => d.action === "ENTER" && d.reasoning.includes("[drift-gate]"))) {
+            return asOwner<
+              ReadonlyArray<{
+                action: string;
+                reasoning: string;
+                executed: boolean;
+                poolAddress: string;
+              }>
+            >(decisions);
+          }
+          yield* Effect.sleep(250);
+        }
+        return yield* Effect.fail(
+          new Error("no [drift-gate] ENTER decision within 25s of scan cycles"),
+        );
+      });
+      return yield* Effect.raceFirst(program, waitForDriftRejection);
     });
     // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const decisions = (await Effect.runPromise(
@@ -291,7 +307,14 @@ describe("drift gate in the decision loop", () => {
     const driftRejections = decisions.filter(
       (d) => d.action === "ENTER" && d.reasoning.includes("[drift-gate]"),
     );
-    expect(driftRejections.length).toBeGreaterThan(0);
+    // A bare length assertion hides what the loop actually decided under load;
+    // the failure summary names every recorded action so the next failure is
+    // self-describing instead of a re-run-and-guess.
+    const observed = decisions.map((d) => `${d.action}:${d.reasoning.slice(0, 90)}`).join("\n");
+    expect(
+      driftRejections.length,
+      `no [drift-gate] ENTER decision in ${decisions.length} recorded decisions:\n${observed}`,
+    ).toBeGreaterThan(0);
     expect(driftRejections[0]!.reasoning).toContain("falling price, no momentum entry");
     const neutralDrift = decisions.filter(
       (d) =>

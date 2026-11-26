@@ -1703,8 +1703,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const copySignalLayer = Layer.provide(CopySignalLive, configLayer);
   const merged17 = Layer.merge(merged16, copySignalLayer);
 
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  return merged17 as Layer.Layer<AllServices, never, never>;
+  return merged17;
 }
 
 /**
@@ -6908,11 +6907,13 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       if (config.fallenAngelEnabled !== true || !shouldDiscoverPools(config)) return;
       // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
-      const discovered = yield* adapter
-        .discoverPools(scanOrdinal)
-        // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
-        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-        .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
+      const discovered = yield* (
+        adapter
+          .discoverPools(scanOrdinal)
+          // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)))
+      );
       if (discovered.length === 0) return;
 
       const fetchSignals = async (pool: {
@@ -8320,11 +8321,13 @@ export const program = Effect.gen(function* () {
       if (now - lastMarketRefreshAt < (config.marketScanRefreshIntervalMs ?? 1_800_000)) return;
       lastMarketRefreshAt = now;
       // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
-      const discovered = yield* adapter
-        .discoverPoolsTopPages(config.marketScanUniversePages ?? 3)
-        // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
-        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-        .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
+      const discovered = yield* (
+        adapter
+          .discoverPoolsTopPages(config.marketScanUniversePages ?? 3)
+          // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)))
+      );
       if (discovered.length === 0) {
         logger.warn("Market scan: universe fetch returned nothing — keeping last ranked set");
         return;
@@ -9529,11 +9532,13 @@ export const program = Effect.gen(function* () {
       // TVL velocity + IL price-drift need a previous reference point, so the
       // previous snapshot must be read BEFORE persisting the current one.
       // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
-      const previousSnapshots = yield* db
-        .getSnapshots(poolAddress, pool.timestamp - PREVIOUS_SNAPSHOT_WINDOW_MS, pool.timestamp)
-        // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
-        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-        .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)));
+      const previousSnapshots = yield* (
+        db
+          .getSnapshots(poolAddress, pool.timestamp - PREVIOUS_SNAPSHOT_WINDOW_MS, pool.timestamp)
+          // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)))
+      );
       const previousSnapshot =
         previousSnapshots.length > 0 ? previousSnapshots[previousSnapshots.length - 1] : undefined;
       const w15Signals = detectDepegAndLiquidityDrain(pool, previousSnapshots, config);

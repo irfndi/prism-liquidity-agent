@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The verification gate. Anything that claims to work must pass ALL of it:
 #
+#   0. toolchain matrix            — coupled pins still agree (see
+#                                    scripts/check-toolchain.ts)
 #   1. typecheck + lint + format   — the code is well-formed
 #   2. unit/property tests         — the accounting identities hold
 #   3. Bend proofs                 — the PnL/strategy laws are proved, not sampled
@@ -14,6 +16,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BEND="${BEND_BIN:-$HOME/.bend/bin/bend}"
+echo "== 0/5 toolchain matrix =="
+bun run check:toolchain
+
 echo "== 1/5 typecheck + lint =="
 bun run lint
 

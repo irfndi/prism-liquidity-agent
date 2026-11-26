@@ -1,4 +1,4 @@
-// ../../../.bun/install/cache/links/@oxlint+plugins@1.79.0-701cd0bee5b3bc86/node_modules/@oxlint/plugins/index.js
+// ../../../../.bun/install/cache/links/@oxlint+plugins@1.94.0-41eb8c5045c32dd1/node_modules/@oxlint/plugins/index.js
 function defineRule(rule) {
   return rule;
 }
