@@ -382,18 +382,19 @@ def maturity_gate_capped_s(+measured_s: Nat, +cap_s: Nat) -> Nat:
 
 # ── Entry momentum (normal / market lane) ────────────────────────────────
 # Ported from engine/strategy-service.ts `entryMomentumBoost` and
-# `normalEntryConfidence`. Confidence and weight are hundredths (0.05 = 5n);
-# fee/IL is hundredths (2.00 = 200n); drift and its reference are whole bins.
+# `normalEntryConfidence`.
 #
-# Why it exists: the drift gate rejects a falling pool, but a rising one used
-# to enter on the SAME static confidence as a flat one, so momentum never
-# reached the score or the confidence floor. The boost is deliberately bounded
-# — unbounded momentum credit would let a single spike clear the ENTER floor.
+# Fixed-point unit is THOUSANDTHS (0.565 = 565n, 0.05 = 50n, fee/IL 1.20 =
+# 1200n). Hundredths was not enough: a pool 2 bins into a 20-bin reference at
+# the default 0.05 weight earns 0.005 of confidence, which truncates to zero at
+# hundredths (2 x 5 / 20 = 0) and made the kernel disagree with the TS source
+# on any sub-unit drift. The repo's own parity rule is that the kernel proves
+# the same number as the source of truth, so the unit is 10x finer.
 #
 # `neg` carries the drift sign (Bend's Nat cannot hold it). A negative drift
 # contributes ZERO: there is no credit for falling prices. `ref = 0` is the
 # unknown-reference case, which contributes zero rather than dividing.
-def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_h: Nat) -> Nat:
+def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
   match neg:
     case True{}:
       0n
@@ -402,13 +403,17 @@ def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_h: Nat) -> Nat:
         case 0n:
           0n
         case 1n+p:
-          Nat.div(Nat.mul(Nat.min(drift, 1n+p), weight_h), 1n+p)
+          Nat.div(Nat.mul(Nat.min(drift, 1n+p), weight_milli), 1n+p)
 
-# normalEntryConfidence: min(0.50 + feeIlRatio x 0.05 + momentum, 0.85).
-def normal_conf_h(+fee_il_100: Nat, neg: Bool, +drift: Nat, +ref: Nat, +weight_h: Nat) -> Nat:
+# normalEntryConfidence: min(0.500 + feeIlRatio x 0.05 + momentum, 0.850),
+# in thousandths. feeIl x 0.05 is `fee_il_milli / 20` (1200 / 20 = 60 = 0.060).
+def normal_conf_milli(+fee_il_milli: Nat, neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
   Nat.min(
-    Nat.add(Nat.add(50n, Nat.div(fee_il_100, 20n)), momentum_scaled(neg, drift, ref, weight_h)),
-    85n,
+    Nat.add(
+      Nat.add(500n, Nat.div(fee_il_milli, 20n)),
+      momentum_scaled(neg, drift, ref, weight_milli),
+    ),
+    850n,
   )
 
 # Evolution may move a threshold, but a hard safety floor still bounds it:

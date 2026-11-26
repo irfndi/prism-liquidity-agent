@@ -32,7 +32,7 @@ import {
   type TaExhaustionPolicy,
 } from "../engine/ta-exhaustion.js";
 import { paperCloseCostsUsd } from "../engine/fee-capture.js";
-import { isBendAvailable, runBendNat, runBendBool, toNat } from "./bend-parity-harness.js";
+import { isBendAvailable, runBendNat, runBendBool, toMilli, toNat } from "./bend-parity-harness.js";
 
 const BEND = isBendAvailable();
 const describeIf = BEND ? describe : describe.skip;
@@ -444,12 +444,14 @@ describeIf("bend parity", () => {
   });
 
   // Momentum credit and the normal-ENTER confidence (strategy-service.ts
-  // entryMomentumBoost / normalEntryConfidence). Every vector is an exact
-  // hundredth so the fixed-point mapping has no rounding drift.
+  // entryMomentumBoost / normalEntryConfidence). Vectors span the thousandths
+  // range, including sub-unit drift: 2 bins into a 20-bin reference at the
+  // default 0.05 weight is 0.005, which a coarser fixed point truncated to zero.
   it("momentum boost is bounded and never credits a falling pool (kernels.bend:momentum_scaled)", () => {
     for (const [drift, ref, weight] of [
       [-30, 20, 0.05],
       [0, 20, 0.05],
+      [2, 20, 0.05],
       [5, 20, 0.2],
       [20, 20, 0.05],
       [500, 20, 0.05],
@@ -457,28 +459,32 @@ describeIf("bend parity", () => {
       const ts = entryMomentumBoost(drift, ref, weight);
       const sign = drift < 0 ? "True{}" : "False{}";
       expect(
-        runBendNat(`K.momentum_scaled(${sign}, ${Math.abs(drift)}n, ${ref}n, ${toNat(weight)})`),
-      ).toBe(BigInt(Math.round(ts * 100)));
+        runBendNat(`K.momentum_scaled(${sign}, ${Math.abs(drift)}n, ${ref}n, ${toMilli(weight)})`),
+      ).toBe(BigInt(Math.round(ts * 1000)));
     }
   });
 
-  it("normal-ENTER confidence floors, lifts, and caps at 0.85 (kernels.bend:normal_conf_h)", () => {
+  it("normal-ENTER confidence floors, lifts, and caps at 0.85 (kernels.bend:normal_conf_milli)", () => {
     const opts = { referenceBins: 20, confBoost: 0.05 };
-    for (const [feeIl, drift, expected] of [
-      [0, 0, 50],
-      [2, 20, 65],
-      [2, -40, 60],
-      [10, 0, 85],
-      [20_000, 20, 85],
-      [1.2, 0, 56],
-      [2.4, 0, 62],
+    for (const [feeIl, drift] of [
+      [0, 0],
+      [2, 20],
+      [2, -40],
+      [1.2, 2],
+      [10, 0],
+      [20_000, 20],
+      [1.2, 0],
+      [2.4, 0],
     ] as const) {
       const ts = normalEntryConfidence(feeIl, drift, opts);
       const sign = drift < 0 ? "True{}" : "False{}";
       expect(
-        runBendNat(`K.normal_conf_h(${toNat(feeIl)}, ${sign}, ${Math.abs(drift)}n, 20n, 5n)`),
-      ).toBe(BigInt(expected));
-      expect(Math.round(ts * 100)).toBe(expected);
+        runBendNat(
+          `K.normal_conf_milli(${toMilli(feeIl)}, ${sign}, ${Math.abs(drift)}n, 20n, ${toMilli(
+            opts.confBoost,
+          )})`,
+        ),
+      ).toBe(BigInt(Math.round(ts * 1000)));
     }
   });
 });

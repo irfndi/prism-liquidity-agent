@@ -167,13 +167,14 @@ jobs:
           scripts/prism.sh --version
           env -u HOME PATH="$PATH" scripts/prism.sh --version
 
-  # Compiled binaries are informational only (oven-sh/bun#42664 is open), and
-  # `bun build --compile` is the slowest step in the pipeline. Its own
-  # non-blocking job keeps it off the required critical path.
+  # Compiled binaries are informational only: `bun build --compile` hits
+  # oven-sh/bun#42664 via @coral-xyz/anchor's bundled ESM output, and the same
+  # tsdown bundle runs fine un-compiled. Reporting a red check for a known
+  # upstream bug trains people to ignore red, so this job separates the two:
+  # the known signature is a notice, anything else still fails.
   compiled-binaries:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -200,14 +201,24 @@ jobs:
         run: bun run scripts/generate-vec-embed.ts linux x64
 
       # Compiled-binary gate: scripts/compile-binary.ts self-verifies every
-      # build it produces (fails loud on the oven-sh/bun#42664 startup crash
-      # instead of shipping a broken artifact). Runs on the linux-x64 runner
-      # (the only target it can smoke-test); skips cleanly elsewhere.
+      # build it produces. The known upstream crash (oven-sh/bun#42664, the
+      # anchor ESM initializer) is reported as a notice instead of a red check,
+      # because the un-compiled bundle is the supported artifact. Any other
+      # failure still fails the job.
       - name: Build and smoke-test compiled binaries
         run: |
           bunx --bun tsdown --config tsdown.cli.config.ts
-          bun scripts/compile-binary.ts prism
-          bun scripts/compile-binary.ts prismd
+          for profile in prism prismd; do
+            if ! out=$(bun scripts/compile-binary.ts "$profile" 2>&1); then
+              if grep -q "exports_esm is not defined" <<<"$out"; then
+                echo "::notice title=oven-sh/bun#42664::${profile} hits the known anchor ESM initializer bug; the un-compiled bundle is the supported artifact"
+                continue
+              fi
+              printf '%s\n' "$out"
+              exit 1
+            fi
+            printf '%s\n' "$out"
+          done
 
   # Cloudflare worker suites (API route tests + Telegram bot) on
   # vitest-pool-workers, which simulates D1/KV/R2 locally — no Cloudflare
@@ -262,10 +273,11 @@ jobs:
   # manifest.json upload lands last — that upload is the pointer flip. No GPG.
   canary-prepare:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # Canary publishes only what the whole pipeline passed: lint and tests are
-    # separate jobs now, so both are explicit prerequisites (they used to run
-    # inside `build`).
-    needs: [lint, test, build]
+    # Canary publishes only what the whole pipeline passed. `lint` and `test`
+    # are separate jobs now, and the formal gates are too: all of them are
+    # explicit prerequisites so a red suite or a broken proof blocks the
+    # publish instead of riding along.
+    needs: [lint, test, build, bend-proof, tla-proof]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Role-scoped group: prepare and publish must not share a group, or an

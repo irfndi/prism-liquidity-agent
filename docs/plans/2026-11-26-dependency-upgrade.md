@@ -128,3 +128,21 @@ Held back, with the constraint that holds them:
   `Schedule` cannot express without a custom schedule that would need its own tests. The adoptions that
   did land (`Config.*` constructors, `Effect.Services<typeof effect>`, `Effect.orElseSucceed`, the
   stricter tsgo assertion rule) each removed code or removed a lie.
+- **The momentum kernels use thousandths, not hundredths.** Hundredths is the repo's default
+  fixed-point unit, but a pool 2 bins into a 20-bin reference at the 0.05 weight earns 0.005 of
+  confidence: `2 × 5 / 20 = 0` truncated it away, so the Bend kernel reported 0.560 where
+  `normalEntryConfidence` returns 0.565. A formal kernel that disagrees with the source of truth on
+  the smallest real momentum proves nothing about that line, so the unit is 10× finer and the parity
+  test carries the 0.565 vector.
+
+## Review follow-ups (PR #248)
+
+| Finding | Verdict | Change |
+| --- | --- | --- |
+| `compiled-binaries` red on the known bun#42664 anchor initializer | real, but the check was wrong | The job no longer swallows every outcome: the known signature is a `::notice`, any other failure still fails. Caught because a red check for a known upstream bug is noise, and `continue-on-error` also hid the real ones. |
+| Canary can publish while `tla-proof` is red | real | `canary-prepare` now needs `[lint, test, build, bend-proof, tla-proof]`. |
+| `OpensNow` can fire on a rejected observation | real | `Admitted` gates it, and `RejectedNeverOpens` is a new invariant in both configs. The breaker must not feed itself. |
+| Momentum kernel truncates sub-unit drift (Codex P2) | real | Kernels moved to thousandths; `confidence_sub_unit_momentum` and `momentum_sub_unit_kept` laws, plus the 0.565 parity vector. |
+| Test timeout leaves 5 s over a 25 s poll budget | real | Poll budget cut to 15 s and the `it` timeout raised to 45 s, so the poll deadline reports a real failure instead of a generic abort. |
+| `check:toolchain` never reads CI `BUN_VERSION` | real | It now scans every workflow for `BUN_VERSION` and compares to `packageManager`; negative control run proves it fails. |
+| `check-toolchain` uses `console.*` | dismissed | `console.*` is what a CLI diagnostic needs: the structured logger appends to the audit trail and is meant for the engine. `scripts/compile-binary.ts`, `build-bundle.ts` and `generate-vec-embed.ts` all print the same way, and this output is read by a person looking at a failed gate. |

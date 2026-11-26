@@ -261,10 +261,11 @@ describe("drift gate in the decision loop", () => {
       // fail on any loaded machine: the block is real-time while cycle
       // throughput collapses under 16-way file parallelism, so 8s could yield
       // exactly one scan cycle (2 token-block decisions) and no drift verdict.
-      // Polling the audit trail succeeds as soon as the rejection lands and
-      // fails with what was actually observed otherwise.
+      // Polling the audit trail succeeds as soon as the rejection lands, and
+      // its own deadline (below) is what reports a real failure.
+      const POLL_ATTEMPTS = 60; // x 250ms = 15s
       const waitForDriftRejection = Effect.gen(function* () {
-        for (let attempt = 0; attempt < 100; attempt++) {
+        for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt++) {
           const decisions = yield* audit.getRecentDecisions(300);
           if (decisions.some((d) => d.action === "ENTER" && d.reasoning.includes("[drift-gate]"))) {
             return asOwner<
@@ -279,7 +280,9 @@ describe("drift gate in the decision loop", () => {
           yield* Effect.sleep(250);
         }
         return yield* Effect.fail(
-          new Error("no [drift-gate] ENTER decision within 25s of scan cycles"),
+          new Error(
+            `no [drift-gate] ENTER decision within ${POLL_ATTEMPTS * 250}ms of scan cycles`,
+          ),
         );
       });
       return yield* Effect.raceFirst(program, waitForDriftRejection);
@@ -321,5 +324,7 @@ describe("drift gate in the decision loop", () => {
         d.action === "ENTER" && d.poolAddress === NEUTRAL && d.reasoning.includes("[drift-gate]"),
     );
     expect(neutralDrift.length).toBe(0);
-  }, 30_000);
+    // 15s poll budget + layer setup + audit reads; without headroom the harness
+    // timeout fires first and reports a generic abort instead of the poll verdict.
+  }, 45_000);
 });

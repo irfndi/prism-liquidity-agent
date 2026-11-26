@@ -63,7 +63,13 @@ Decide ==
   ELSE IF Retriable /\ attempt < MaxRetries THEN "retry"
   ELSE "fail"
 
-OpensNow == Strikable /\ StrikesAfter >= Threshold
+\* A rejected observation never reaches the effect, so it can never record a
+\* failure. `CircuitBreaker.execute` returns before `onFailure` in both reject
+\* branches; opening the breaker from a call it refused to make would let the
+\* breaker feed itself.
+Admitted == Decide \notin {"reject-open", "reject-trial"}
+
+OpensNow == Admitted /\ Strikable /\ StrikesAfter >= Threshold
 
 Init ==
   /\ breaker \in {"closed", "open", "half"}
@@ -93,6 +99,10 @@ OpenRejectsWithoutCall == OpenRejects => decision = "reject-open"
 
 \* 2. A half-open probe admits exactly one caller.
 HalfOpenSingleProbe == TrialRejects => decision = "reject-trial"
+
+\* 3. A call the breaker refused cannot open it.
+RejectedNeverOpens ==
+  (decision = "reject-open" \/ decision = "reject-trial") => ~opens
 
 \* 3. Only transient transport errors are retried.
 RetryOnlyTransient == decision = "retry" => kind = "transient"

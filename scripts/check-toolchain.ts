@@ -16,9 +16,12 @@
  *
  * Each check names the requirement and the fix. Exit 1 on any mismatch.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import semver from "semver";
+import { createLogger } from "../engine/logger.js";
+
+const logger = createLogger("toolchain");
 
 interface Manifest {
   readonly version: string;
@@ -145,12 +148,29 @@ for (const tag of new Set([...dockerfile.matchAll(/FROM oven\/bun:([\w.-]+)/g)].
   );
 }
 
+// ─── Bun pins in the workflows ──────────────────────────────────────────────
+// Every workflow installs Bun from its own `BUN_VERSION` env line. A CI-only
+// drift is invisible to the manifest and Dockerfile checks above, so read the
+// files themselves rather than trusting the diagnostic to be followed.
+const workflowDir = join(root, ".github/workflows");
+for (const file of readdirSync(workflowDir).filter((entry) => entry.endsWith(".yml"))) {
+  const text = readFileSync(join(workflowDir, file), "utf8");
+  for (const match of text.matchAll(/^\s*BUN_VERSION:\s*([\w.]+)\s*$/gm)) {
+    check(
+      `.github/workflows/${file}`,
+      `workflow pins BUN_VERSION ${match[1] ?? "(empty)"} but packageManager pins bun@${managerVersion ?? "(unset)"}.`,
+      match[1] === managerVersion,
+    );
+  }
+}
+
 if (failures.length > 0) {
-  console.error("toolchain check failed:\n");
-  for (const failure of failures) console.error(`  ✗ ${failure}\n`);
+  logger.error("toolchain check failed", { failures });
+  for (const failure of failures) logger.error(`  ✗ ${failure}`);
   process.exit(1);
 }
-console.log(
+logger.info(
   `toolchain ok: effect ${effectVersion} ↔ tsgo ${tsgo.version}, oxlint ${pin(pkg, "oxlint")}, ` +
-    `dlmm peers satisfied, anti-slop bundles current, bun ${managerVersion}`,
+    `dlmm peers satisfied, anti-slop bundles current, bun ${managerVersion} in the manifest, ` +
+    `Dockerfile and every workflow`,
 );
