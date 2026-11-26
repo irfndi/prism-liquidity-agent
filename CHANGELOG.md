@@ -2,6 +2,25 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.46] — 2026-11-26
+
+### Fixed
+
+- **Refunded rent was booked as trading profit (#243).** The exit measured the whole wallet delta (principal + swept fees + the rent refund for the position, its bin arrays and its ATAs) while the entry recorded only the planned `positionSizeUsd`. Every clean close therefore booked ~0.045 SOL of refunded rent as revenue — a dead-flat round trip read as **+16% on a $20 position**. Chain reconstruction of 2,924 transactions showed the wallet funded 2.7745 SOL, returned 0.2605 and held ≈0.645: **−1.87 SOL (−67%)** while the ledger reported **+$6.91**. The sign inversion disarmed `REALIZED_PNL_HALT`, `POOL_PNL_KILL_SWITCH`, rule attribution and the agent overlay for three months (regression window: #205 on 2026-08-09 → here). The entry now measures the same wallet delta and stores the gap in `entry_overhead_usd` (migration v26, additive); the exit subtracts it (`netWithdrawnUsd`) before realized is computed, so both sides are deposit-only and a flat round trip realizes exactly 0.
+- **Unmeasured entry overhead now yields n/a, never gross (#244).** A live close whose basis was never measured still had rent inside the withdrawal; realized is recorded as NULL with `pricing: "rentUnresolved"`, the same convention as an unpriced exit.
+- **Forced single-sided entries keep their overhead (#244).** `fetchEntryPrices` passes `priceY = 0` on `forceSingleSidedX`, which made the measurement bail out; a leg that spent nothing no longer needs a price, and the SOL leg prices from a resolved SOL/USD because rent is paid in SOL.
+- **`prism close` applies the same rule (#244).** It passes the stored overhead and records n/a when missing, instead of booking rent as profit.
+
+### Added
+
+- **`prism audit-pnl` (#243, hardened in #244)** — re-derives every closed position from its stored legs and classifies it `ok` / `drift` / `unpriced` / `rent-unaccounted`, prints reported vs **trusted-only** PnL (only `ok` rows), and exits 1 on drift. It subtracts the `exit_sweep` CLAIM back out so sweeps are not counted twice, ignores paper rows, tolerates a pre-v26 database, and `--apply-rent-backfill` voids unprovenanced rows to NULL with `pricing: "rentUnaccounted"`, idempotently.
+- **`bun run verify`** — the gate now covers formal verification: lint/format, the full suite, `bend PROOF.bend` (21 new PnL laws, including `rent_booked_as_profit_without_overhead == +rent` pinned as a law and `flat_round_trip == 0`), and `bun run verify:tla` (TLC on the fixed ledger model, plus the buggy model that **must fail** — the negative control). `scripts/tla-verify.sh` pins the TLC jar by SHA-256 and keeps its logs in `mktemp -d`.
+
+### Notes
+
+- The fix does not make the strategy profitable. At `MAX_ENTRY_SIZE_USD=20` with ~4h holds, fee income is ≈$0.0065 per trade against a ≈$0.06 exit swap (break-even needs 1.5–3.1 days at 71% APR), and the market gate admits 0 of 1,695 pools. See `docs/plan/2026-11-26-chain-verified-pnl-and-recovery.md`.
+- The 155 closes written between #205 and this release cannot be repaired exactly (the rent was never recorded). `prism audit-pnl --apply-rent-backfill` voids them to NULL rather than estimating a per-row figure.
+
 ## [0.2.45] — 2026-11-10
 
 ### Added
