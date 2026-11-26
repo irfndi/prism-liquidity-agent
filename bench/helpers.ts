@@ -172,6 +172,11 @@ function positionExitDefaults(overrides: Partial<PositionRecord>) {
     launchRunner: overrides.launchRunner ?? null,
     launchRunnerSteps: overrides.launchRunnerSteps ?? null,
     launchRunnerAnchorPrice: overrides.launchRunnerAnchorPrice ?? null,
+    // Synthetic positions model a MEASURED entry with no overhead beyond the
+    // deposit. Leaving this undefined would mean "unmeasured", and the ledger
+    // now (correctly) records such a close as n/a — pass null explicitly to
+    // exercise that path.
+    entryOverheadUsd: overrides.entryOverheadUsd === undefined ? 0 : overrides.entryOverheadUsd,
   };
 }
 
@@ -497,6 +502,9 @@ export function makeAdapter(
         depositMode: "two-sided" as const,
         amountXUsd: positionSizeUsd / 2,
         amountYUsd: positionSizeUsd / 2,
+        // A MEASURED entry with no overhead beyond the deposit. `null` would
+        // mean "unmeasured" and the ledger now records such a close as n/a.
+        entryOverheadUsd: 0,
       }),
     exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
     rebalancePosition: () =>

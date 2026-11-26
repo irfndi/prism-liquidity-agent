@@ -675,6 +675,7 @@ describe("runner scale-in wiring (Heart Attack step 2)", () => {
         depositMode: "two-sided" as const,
         amountXUsd: size / 2,
         amountYUsd: size / 2,
+        entryOverheadUsd: 0,
       }),
     );
     const adapter = makeAdapter(

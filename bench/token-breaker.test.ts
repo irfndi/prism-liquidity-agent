@@ -126,6 +126,7 @@ function makeProgramAdapter(
         depositMode: "two-sided" as const,
         amountXUsd: sizeUsd / 2,
         amountYUsd: sizeUsd / 2,
+        entryOverheadUsd: 0,
       }),
     exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
     rebalancePosition: () =>

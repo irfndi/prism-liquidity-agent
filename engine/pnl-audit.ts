@@ -46,8 +46,11 @@ export interface AuditRow {
   /** USD value the EXIT event recorded (the withdrawal, gross of overhead). */
   readonly withdrawnUsd: number | null;
   readonly modeledCostsUsd: number | null;
+  /** Lifetime fees claimed, INCLUDING the exit sweep credited after realized. */
   readonly feesUsd: number;
   readonly rewardsUsd: number;
+  /** The exit sweep credited after realized — must not be added twice. */
+  readonly sweepFeeUsd: number;
 }
 
 export interface AuditFinding {
@@ -78,7 +81,12 @@ export interface PnlAudit {
 export function deriveRealizedUsd(row: AuditRow): number | null {
   if (row.depositedUsd === null || row.withdrawnUsd === null) return null;
   const costs = row.modeledCostsUsd ?? 0;
-  return row.withdrawnUsd + row.feesUsd + row.rewardsUsd - row.depositedUsd - costs;
+  // The withdrawal already contains the fees the close batch swept, and the
+  // sweep is credited into `cumulative_fees_claimed_usd` AFTER realized is
+  // computed. Adding the stored lifetime total would count them twice and
+  // report every sweeping close as drift.
+  const priorFees = Math.max(0, row.feesUsd - row.sweepFeeUsd);
+  return row.withdrawnUsd + priorFees + row.rewardsUsd - row.depositedUsd - costs;
 }
 
 /**
@@ -98,6 +106,7 @@ export function auditRow(row: AuditRow): AuditFinding {
     };
   }
   if (
+    row.positionPubKey !== null &&
     row.closedAt !== null &&
     row.closedAt >= RENT_BASIS_EPOCH_MS &&
     row.entryOverheadUsd === null
@@ -142,13 +151,16 @@ export function auditRows(rows: readonly AuditRow[]): PnlAudit {
   const rentBackfill = findings
     .filter((f) => f.status === "rent-unaccounted")
     .map((f) => f.positionId);
+  // Trusted-only means: re-derived from stored legs AND provenance intact.
+  // Drift and unpriced rows stay out of it — a total labelled "trusted" must
+  // not contain rows the same report just flagged.
+  const okById = new Set(findings.filter((f) => f.status === "ok").map((f) => f.positionId));
   let reported = 0;
-  let backfilled = 0;
-  const backfillSet = new Set(rentBackfill);
+  let trusted = 0;
   for (const row of rows) {
     if (row.realizedPnlUsd === null) continue;
     reported += row.realizedPnlUsd;
-    if (backfillSet.has(row.positionId)) backfilled += row.realizedPnlUsd;
+    if (okById.has(row.positionId)) trusted += row.realizedPnlUsd;
   }
   return {
     closedCount: rows.length,
@@ -156,7 +168,7 @@ export function auditRows(rows: readonly AuditRow[]): PnlAudit {
     counts,
     rentBackfill,
     reportedUsd: reported,
-    adjustedUsd: reported - backfilled,
+    adjustedUsd: trusted,
   };
 }
 
@@ -171,24 +183,42 @@ interface PositionDbRow {
   readonly cumulative_rewards_claimed_usd: number | null;
   readonly withdrawn_usd: number | null;
   readonly modeled_costs_usd: number | null;
+  readonly sweep_fee_usd: number | null;
+}
+
+/** Does a table carry this column? (Pre-migration databases do not.) */
+function columnExists(db: Database, table: string, column: string): boolean {
+  // SAFETY: PRAGMA table_info rows always carry a `name` TEXT column.
+  const rows = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((r) => r.name === column);
 }
 
 /** Read every closed position with the legs the audit needs (EXIT event joined). */
 export function readClosedPositions(db: Database): AuditRow[] {
+  // A pre-v26 database has no `entry_overhead_usd` column yet (the engine adds
+  // it on its next start). Reading it directly would make the audit and the
+  // backfill unusable exactly when they are most needed, so the column is
+  // selected as NULL when absent — every row then classifies as unprovenanced.
+  const overheadExpr = columnExists(db, "positions", "entry_overhead_usd")
+    ? "p.entry_overhead_usd"
+    : "NULL AS entry_overhead_usd";
   // SAFETY: the SELECT projects exactly these columns with these SQLite
   // affinities (REAL/integer ids, TEXT pubkeys, JSON scalar for the costs), so
   // each row matches PositionDbRow; a NULL column lands as null.
   const rows = db
     .query(
       `SELECT p.position_id, p.closed_at, p.position_pubkey, p.deposited_usd,
-              p.realized_pnl_usd, p.entry_overhead_usd,
+              p.realized_pnl_usd, ${overheadExpr},
               p.cumulative_fees_claimed_usd, p.cumulative_rewards_claimed_usd,
               (SELECT e.value_usd FROM position_events e
                  WHERE e.position_id = p.position_id AND e.event = 'EXIT'
                  ORDER BY e.created_at LIMIT 1) AS withdrawn_usd,
               (SELECT json_extract(e.metadata, '$.modeledCostsUsd') FROM position_events e
                  WHERE e.position_id = p.position_id AND e.event = 'EXIT'
-                 ORDER BY e.created_at LIMIT 1) AS modeled_costs_usd
+                 ORDER BY e.created_at LIMIT 1) AS modeled_costs_usd,
+              (SELECT COALESCE(SUM(e.fees_usd), 0) FROM position_events e
+                 WHERE e.position_id = p.position_id AND e.event = 'CLAIM'
+                   AND json_extract(e.metadata, '$.kind') = 'exit_sweep') AS sweep_fee_usd
          FROM positions p
         WHERE p.closed_at IS NOT NULL`,
     )
@@ -204,6 +234,7 @@ export function readClosedPositions(db: Database): AuditRow[] {
     modeledCostsUsd: r.modeled_costs_usd,
     feesUsd: r.cumulative_fees_claimed_usd ?? 0,
     rewardsUsd: r.cumulative_rewards_claimed_usd ?? 0,
+    sweepFeeUsd: r.sweep_fee_usd ?? 0,
   }));
 }
 

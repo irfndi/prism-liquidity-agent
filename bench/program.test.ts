@@ -128,6 +128,7 @@ describe("executeLive", () => {
           depositMode: "two-sided" as const,
           amountXUsd: positionSizeUsd / 2,
           amountYUsd: positionSizeUsd / 2,
+          entryOverheadUsd: 0,
         }),
       exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
       rebalancePosition: () =>
@@ -341,6 +342,7 @@ describe("executeLive", () => {
         depositMode: "two-sided" as const,
         amountXUsd: positionSizeUsd / 2,
         amountYUsd: positionSizeUsd / 2,
+        entryOverheadUsd: 0,
       }),
     );
     const adapter: AdapterApi = {
@@ -410,6 +412,7 @@ describe("executeLive", () => {
           depositMode: "two-sided" as const,
           amountXUsd: sizeUsd / 2,
           amountYUsd: sizeUsd / 2,
+          entryOverheadUsd: 0,
         }),
     );
 
@@ -468,6 +471,7 @@ describe("executeLive", () => {
                 depositMode: "single-sided-x" as const,
                 amountXUsd: positionSizeUsd,
                 amountYUsd: 0,
+                entryOverheadUsd: 0,
               }),
           },
           strategy: makeStrategy(),

@@ -3659,6 +3659,8 @@ interface LedgerExitRealized {
   readonly pricedSweptRewardUsd: number;
   readonly withdrawnUsd: number | null;
   readonly pricingUnresolved: boolean;
+  /** Live close with no measured entry overhead: realized is unknown, not gross. */
+  readonly overheadUnknown: boolean;
   readonly isEmptyReap: boolean;
   /** Live close costs debited from realized PnL (0 on an empty reap). */
   readonly modeledCostsUsd: number;
@@ -3676,6 +3678,49 @@ function liveCloseCostInput(deps: LiveExecDeps, pos: PositionRecord): LiveCloseC
   };
 }
 
+/** Priced LM rewards swept by the close batch (unpriced slots contribute 0). */
+function sumPricedRewards(
+  swept: ReadonlyArray<{ readonly amountUsd: number | null }> | null | undefined,
+): number {
+  let total = 0;
+  for (const reward of swept ?? []) {
+    if (reward.amountUsd != null) total += reward.amountUsd;
+  }
+  return total;
+}
+
+/** Realized PnL for the ledger path; null when the basis or value is unknown. */
+function ledgerRealizedUsd(input: {
+  readonly withdrawnUsd: number | null;
+  readonly isEmptyReap: boolean;
+  readonly pricingUnresolved: boolean;
+  readonly priorFeesUsd: number;
+  readonly priorRewardsUsd: number;
+  readonly sweptRewardUsd: number;
+  readonly depositedUsd: number;
+  readonly modeledCostsUsd: number;
+}): number | null {
+  if (input.isEmptyReap || input.pricingUnresolved || input.withdrawnUsd === null) return null;
+  const gross = computeRealizedPnlUsd(
+    input.withdrawnUsd,
+    input.priorFeesUsd,
+    input.depositedUsd,
+    input.priorRewardsUsd + input.sweptRewardUsd,
+  );
+  return gross - input.modeledCostsUsd;
+}
+
+/**
+ * A LIVE close whose entry overhead was never measured has a gross withdrawal:
+ * refunded rent is inside it with no basis to remove it, so realized is
+ * unknown (n/a) — never gross, and never 0.
+ */
+function exitOverheadUnknown(pos: PositionRecord, isEmptyReap: boolean): boolean {
+  if (isEmptyReap) return false;
+  if (pos.positionPubKey === null) return false;
+  return (pos.entryOverheadUsd ?? null) === null;
+}
+
 function computeLedgerExitRealized(
   pos: PositionRecord,
   exitResultData: LiveExitResultData | null,
@@ -3687,32 +3732,37 @@ function computeLedgerExitRealized(
   //    (null / amounts absent) there is NO trusted value → NULL path:
   //    realized recorded n/a, never the mark, never 0.
   const withdrawnUsd = exitResultData?.withdrawnUsd ?? null;
-  const pricingUnresolved = withdrawnUsd === null;
-  const sweptRewards = exitResultData?.sweptRewards ?? [];
-  const pricedSweptRewardUsd = sweptRewards.reduce(
-    (acc, r) => (r.amountUsd != null ? acc + r.amountUsd : acc),
-    0,
-  );
+  const pricedSweptRewardUsd = sumPricedRewards(exitResultData?.sweptRewards);
   const isEmptyReap = exitResultData?.isEmptyReap ?? false;
+  // A live position whose ENTRY overhead was never measured (legacy row, failed
+  // snapshot, pre-v26 close) has a gross withdrawal: refunded rent is inside
+  // it and no basis exists to remove it. Booking that as realized is exactly
+  // the defect this fixes, so the value is UNKNOWN (n/a), not gross — the same
+  // convention as an unpriced exit. An empty reap has no basis at all and is
+  // handled separately below.
+  const overheadUnknown = exitOverheadUnknown(pos, isEmptyReap);
+  const pricingUnresolved = withdrawnUsd === null || overheadUnknown;
   // 2. Compute on the PRIOR cumulatives only — the exit sweep is credited
   //    AFTER this (step 4) so it is never double-counted. Live close costs
   //    (exit swap, entry/exit gas, claim txs) debit the gross figure: they
   //    are spent on-chain but appear in no measured USD amount above.
   const modeledCostsUsd = isEmptyReap ? 0 : liveCloseCostsUsd(costs);
-  const realizedPnlUsd =
-    isEmptyReap || pricingUnresolved
-      ? null
-      : computeRealizedPnlUsd(
-          withdrawnUsd,
-          pos.cumulativeFeesClaimedUsd,
-          pos.depositedUsd,
-          pos.cumulativeRewardsClaimedUsd + pricedSweptRewardUsd,
-        ) - modeledCostsUsd;
+  const realizedPnlUsd = ledgerRealizedUsd({
+    withdrawnUsd,
+    isEmptyReap,
+    pricingUnresolved,
+    priorFeesUsd: pos.cumulativeFeesClaimedUsd,
+    priorRewardsUsd: pos.cumulativeRewardsClaimedUsd,
+    sweptRewardUsd: pricedSweptRewardUsd,
+    depositedUsd: pos.depositedUsd,
+    modeledCostsUsd,
+  });
   return {
     realizedPnlUsd,
     pricedSweptRewardUsd,
     withdrawnUsd,
     pricingUnresolved,
+    overheadUnknown,
     isEmptyReap,
     modeledCostsUsd,
   };
@@ -3915,6 +3965,7 @@ function buildExitMetadata(
   exitResultData: LiveExitResultData | null,
   modeledCostsUsd: number,
   exitReason?: string,
+  overheadUnknown = false,
 ) {
   const reason = exitReasonField(exitReason);
   // Cost-basis provenance: the gross measured withdrawal and the entry
@@ -3930,7 +3981,7 @@ function buildExitMetadata(
     realizedPnlUsd,
     modeledCostsUsd,
     ...basis,
-    pricing: "unresolved",
+    pricing: overheadUnknown ? "rentUnresolved" : "unresolved",
     lastMarkUsd: currentValueUsd,
     ...reason,
     ...unresolvedExitRaw(exitResultData),
@@ -3986,6 +4037,10 @@ function finalizeLiveExitLedger(
   pricingUnresolved: boolean,
   modeledCostsUsd: number,
 ): Effect.Effect<void, never> {
+  // Provenance for the EXIT event: a live close with no measured entry
+  // overhead reports `rentUnresolved`, so the audit can tell "we could not
+  // value this" from "we valued it and it was zero".
+  const overheadUnknown = exitOverheadUnknown(pos, exitResultData?.isEmptyReap ?? false);
   return Effect.gen(function* () {
     // Persist the credited cumulatives onto the (still-open) row, THEN
     // close — closePosition runs last so the savePosition upsert (which
@@ -4017,6 +4072,7 @@ function finalizeLiveExitLedger(
       exitResultData,
       modeledCostsUsd,
       decision.reasoning,
+      overheadUnknown,
     );
     yield* deps.db
       .savePositionEvent({

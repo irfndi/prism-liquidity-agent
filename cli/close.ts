@@ -118,6 +118,42 @@ function resolvePosition(
   });
 }
 
+/**
+ * Realized PnL for a manual close. A live row with no measured entry overhead
+ * has a withdrawal that still contains the rent refund, so its realized value
+ * is UNKNOWN (n/a) — the same rule the autonomous EXIT applies. Booking the
+ * gross figure is exactly the defect this release fixes.
+ */
+interface ManualCloseAccounting {
+  readonly withdrawnUsd: number | null;
+  readonly realizedPnlUsd: number | null;
+}
+
+function manualCloseAccounting(
+  pos: PositionRecord,
+  result: {
+    readonly isEmptyReap?: boolean | undefined;
+    readonly withdrawnUsd?: number | null | undefined;
+  },
+  config: Parameters<typeof liveCloseCostsFor>[1],
+): ManualCloseAccounting {
+  const withdrawnUsd = result.withdrawnUsd ?? null;
+  const unmeasuredBasis =
+    !(result.isEmptyReap ?? false) &&
+    pos.positionPubKey !== null &&
+    (pos.entryOverheadUsd ?? null) === null;
+  if (unmeasuredBasis) return { withdrawnUsd, realizedPnlUsd: null };
+  return {
+    withdrawnUsd,
+    realizedPnlUsd: computeClosePnl(
+      withdrawnUsd,
+      result.isEmptyReap,
+      pos,
+      liveCloseCostsFor(pos, config),
+    ),
+  };
+}
+
 export const closeCommand = new Command("close")
   .description("Close an open position: withdraw on-chain and settle the ledger")
   .argument("<positionId>", "position id or on-chain position public key")
@@ -152,15 +188,14 @@ closeCommand.action(async function (this: Command, positionId: string) {
       console.log(
         `Closing ${pos.tokenXSymbol}/${pos.tokenYSymbol} (${pos.poolAddress}) position ${pos.positionId} (${pos.positionPubKey})…`,
       );
-      const result = yield* adapter.exitPosition(pos.poolAddress, pos.positionPubKey);
+      // Same accounting as the autonomous EXIT: the stored entry overhead must
+      // be passed, or the rent refund inside the measured withdrawal is booked
+      // as profit on a manual close too.
+      const result = yield* adapter.exitPosition(pos.poolAddress, pos.positionPubKey, {
+        entryOverheadUsd: pos.entryOverheadUsd ?? undefined,
+      });
 
-      const withdrawnUsd = result.withdrawnUsd ?? null;
-      const realizedPnlUsd = computeClosePnl(
-        withdrawnUsd,
-        result.isEmptyReap,
-        pos,
-        liveCloseCostsFor(pos, config),
-      );
+      const { withdrawnUsd, realizedPnlUsd } = manualCloseAccounting(pos, result, config);
 
       yield* db.closePosition(pos.positionId, realizedPnlUsd);
 
