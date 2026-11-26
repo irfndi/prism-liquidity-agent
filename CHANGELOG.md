@@ -2,6 +2,36 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.48] — 2026-11-26
+
+### Changed
+
+- **Effect 4.1.6 and Vitest 5 (#248).** Effect moved from `4.0.0-rc.111` to `4.1.6`: `Config.string/number/boolean` became `Config.String/Number/Boolean` (102 call sites), `FEE_DESTINATION` no longer relies on `withDefault` absorbing a provider error, startup validation is a defect like its siblings, and `ConfigLive` now publishes an explicit `Layer<ConfigService, never, never>` contract so the `buildLayer` cast could be deleted. Vitest moved to 5.1.2 with the matching coverage provider. Also `bs58` 6, `dotenv` 18, `@clack/prompts` 1.9, `commander` 15.1, `chalk` 6.0.1, `semver` 7.8.6, `tsdown` 0.23.7, `oxfmt` 0.80, `oxlint` 1.94 (+ `oxlint-tsgolint` 7.0.2008), `fast-check` 4.11 and `@types/node` 26.6.11. Bun pinned at 1.4.5 across `packageManager`, `bun-types`, both Dockerfile stages and CI.
+- **`bun run check:toolchain` (verify step 0, CI before lint).** Fails when a coupled pin drifts: the effect↔tsgo↔oxlint support table, the `@meteora-ag/dlmm` peer ranges for `@solana/web3.js` and `@coral-xyz/anchor`, the anti-slop Oxlint bundle versions, and every workflow `BUN_VERSION` against `packageManager`. Negative controls are proven, including a quoted value and an inline comment.
+- **Held back on purpose.** `@solana/web3.js` stays 1.98.4 and `@coral-xyz/anchor` stays 0.31.0 (required by `@meteora-ag/dlmm` 1.9.14; web3.js 3.x rewrote the connection/transaction API the adapter is written against), oxlint stays 1.94.0 (tsgo 0.73.4 supports 1.91–1.94 only), and TypeScript stays 7.0.2 (7.1 is beta-only). `check:toolchain` fails if any of them drifts.
+
+### Fixed
+
+- **TA-exhaustion no longer calls a losing position "profit-exhaustion" (#237).** The confluence is price-only and fired on positions already net-negative. The caller now supplies the projected realized P&L — mark value + claimed fees + unclaimed LM rewards − cost basis − modeled close costs — and the reasoning claims `profit-exhaustion` only when it is ≥ 0, `losing position` otherwise. The vote itself is unchanged at the defaults, so this is a truth fix, not a behavior change.
+- **The projection prices the close that will actually run (#237 reviews).** Live mode projects live accounting, paper mode projects paper accounting (`PAPER_MODE_EXIT_LIVE` hybrid included), and paper settlement's accumulated rebalance costs are debited. Pending LM rewards are read through the adapter and priced net of a Token-2022 transfer fee, matching `exitPosition`'s valuation; a transfer-fee leg, an unknown mint or a missing price makes the projection unknown (`null`), never zero.
+- **Mark provenance is explicit (#237).** The per-cycle value refresh stamps `valueMarkKnown` (runtime-only): true when the mark values what a close would withdraw, false for a live fallback (HODL/deposit). P&L-gated rules treat an unknown mark as unknown instead of as a valuation.
+- **A stalled pending-income read cannot hold the decision loop.** The TA pending-reward read is bounded at 2 seconds and a timeout is unknown, so the loss-side exits queued behind the TA vote are never starved by RPC.
+
+### Added
+
+- **TA-exhaustion policy config (#237).** `TA_EXHAUSTION_ENABLED` (default `true`, the pre-#237 always-on behavior), `TA_EXHAUSTION_RSI_THRESHOLD` (90, clamped [50, 100]), `TA_EXHAUSTION_MIN_HOLD_MS` (0), `TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL` (`false`; when on, a measured fee/IL at or above the floor satisfies the alternative leg) and `TA_EXHAUSTION_MIN_FEE_IL_RATIO` (1.2). A disabled gate skips its price-history read entirely.
+
+### Verification
+
+- **TLA+ `TaExhaustion.tla`.** Models the gate's temporal contract: no unqualified loss close, the hold floor, honest-gate liveness, and a must-fail pre-#237 control. Fixed, win and toxic configs pass; the buggy config must fail.
+- **TLA+ `Resilience.tla`.** The RPC retry budget and circuit breaker, matching the runtime's two classifiers (`isRpcNetworkError` strikes on rate limits, HTTP 4xx/5xx and transport failures; `isRetriableError` retries rate limits only; caller-side errors do neither). `RetryNeverOpens` and `RejectedNeverOpens` are new invariants — the breaker must not feed itself — and the buggy config trips `LocalErrorDoesNotStrike`. The gate now runs six fixed models and four buggy ones that must fail.
+- **Bend.** Entry-momentum and normal-confidence kernels (thousandths, round-half-up, and one combined rounding for fee + momentum so parity with `normalEntryConfidence` holds at 0.565), taking the proof to 108 laws (`300n`).
+- **Suite and CI.** 2,396 tests under Vitest 5, coverage clears the configured thresholds. CI runs lint/test/build in parallel with lockfile-keyed Bun caches, `--frozen-lockfile` and per-job timeouts; the formal gate runs as its own job with a digest-pinned TLC jar; the canary now gates on lint + test + build + Bend + TLA, and docs-only `main` pushes skip the pipeline while PR runs still cancel on push.
+
+### Notes
+
+- **Compiled binaries are still informational.** `bun build --compile` still hits `oven-sh/bun#42664` through `@coral-xyz/anchor`'s ESM output. The CI job no longer hides every failure: the known signature is a notice, anything else fails.
+
 ## [0.2.47] — 2026-11-26
 
 ### Added
