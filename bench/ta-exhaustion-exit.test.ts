@@ -50,6 +50,8 @@ interface CycleOptions {
   pendingRewardsUsd?: number | null;
   /** Live entry overhead; null = unmeasured (the ledger books NULL). */
   entryOverheadUsd?: number | null;
+  /** Adapter mint authorities report a Token-2022 transfer fee. */
+  transferFeeEnabled?: boolean;
   /** Wait for the paper close row so the settled sign can be asserted. */
   expectClose?: boolean;
   config?: Partial<AppConfig>;
@@ -75,6 +77,7 @@ async function runCycle(opts: CycleOptions): Promise<CycleResult> {
   const mark = opts.positionValueUsd;
   const pending = opts.pendingFeesUsd;
   const pendingRewards = opts.pendingRewardsUsd;
+  const transferFee = opts.transferFeeEnabled;
   const adapter = makeAdapter(
     {
       [POOL]: makePool({
@@ -94,6 +97,16 @@ async function runCycle(opts: CycleOptions): Promise<CycleResult> {
         : undefined),
       ...(pendingRewards !== undefined
         ? { getClaimableRewardsUsd: () => Effect.succeed(pendingRewards) }
+        : undefined),
+      ...(transferFee !== undefined
+        ? {
+            getMintAuthorities: () =>
+              Effect.succeed({
+                mintAuthority: null,
+                freezeAuthority: null,
+                transferFeeEnabled: transferFee,
+              }),
+          }
         : undefined),
     },
   );
@@ -429,6 +442,50 @@ describe("TA-exhaustion E2E (#237)", () => {
     });
     expect(taExit(decisions)).toBeUndefined();
     expect(decisions.some((row) => row.action !== "ENTER")).toBe(true);
+  }, 15_000);
+
+  it("a live transfer-fee leg is UNKNOWN (gross mark differs from the net withdrawal)", async () => {
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: 0,
+      transferFeeEnabled: true,
+      config: { paperTrading: false, allowTransferFeeTokens: true },
+    });
+    const exit = taExit(decisions);
+    expect(exit?.reasoning).toContain("P&L unknown");
+    expect(exit?.reasoning).not.toContain("profit-exhaustion");
+  }, 15_000);
+
+  it("...and the P&L gate fails closed on a transfer-fee leg", async () => {
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: 0,
+      transferFeeEnabled: true,
+      config: {
+        paperTrading: false,
+        allowTransferFeeTokens: true,
+        taExhaustionRequireNonnegativePnl: true,
+      },
+    });
+    expect(taExit(decisions)).toBeUndefined();
+    expect(decisions.some((row) => row.action !== "ENTER")).toBe(true);
+  }, 15_000);
+
+  it("paper positions keep the paper mark when a fee leg is allowed", async () => {
+    // Paper settlement never withdraws through the token program, so the
+    // transfer-fee net-amount caveat does not apply there.
+    const { decisions } = await runCycle({
+      currentPrice: 90,
+      transferFeeEnabled: true,
+      config: { allowTransferFeeTokens: true },
+    });
+    expect(taExit(decisions)?.reasoning).toContain("losing position");
   }, 15_000);
 
   it("TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL suppresses the losing exit", async () => {

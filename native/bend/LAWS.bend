@@ -209,16 +209,19 @@ law ta_label_unknown_is_unknown:
 
 # Provenance: either unknown input makes the projection unknown.
 law ta_known_requires_mark:
-  {K.ta_known(False{}, True{}, True{}) == False{} : Bool}
+  {K.ta_known(False{}, True{}, True{}, True{}) == False{} : Bool}
 
 law ta_known_requires_pending:
-  {K.ta_known(True{}, False{}, True{}) == False{} : Bool}
+  {K.ta_known(True{}, False{}, True{}, True{}) == False{} : Bool}
 
 law ta_known_requires_overhead:
-  {K.ta_known(True{}, True{}, False{}) == False{} : Bool}
+  {K.ta_known(True{}, True{}, False{}, True{}) == False{} : Bool}
+
+law ta_known_requires_net_amounts:
+  {K.ta_known(True{}, True{}, True{}, False{}) == False{} : Bool}
 
 law ta_known_when_all_present:
-  {K.ta_known(True{}, True{}, True{}) == True{} : Bool}
+  {K.ta_known(True{}, True{}, True{}, True{}) == True{} : Bool}
 
 # Non-negative requires known AND zero loss.
 law ta_nonnegative_zero_loss:

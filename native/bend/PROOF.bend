@@ -226,6 +226,9 @@ def L.ta_known_requires_pending():
 def L.ta_known_requires_overhead():
   {==}
 
+def L.ta_known_requires_net_amounts():
+  {==}
+
 def L.ta_known_when_all_present():
   {==}
 

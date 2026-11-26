@@ -163,6 +163,19 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
     expect(Number.isNaN(net)).toBe(true);
   });
 
+  it("a transfer-fee leg is UNKNOWN (gross mark differs from the net withdrawal)", () => {
+    const net = taExhaustionNetPnlUsd({
+      depositedUsd: 1_000,
+      currentValueUsd: 1_050,
+      cumulativeFeesClaimedUsd: 1,
+      cumulativeRewardsClaimedUsd: 0,
+      ageMs: 0,
+      paperTrading: false,
+      transferFeeKnown: false,
+    });
+    expect(Number.isNaN(net)).toBe(true);
+  });
+
   it("treats a non-finite age as zero days instead of poisoning the projection", () => {
     const net = taExhaustionNetPnlUsd({
       depositedUsd: 1_000,

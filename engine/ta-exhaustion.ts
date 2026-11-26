@@ -290,6 +290,10 @@ export interface TaExhaustionNetPnlInput {
   /** False when a live row's entry overhead was never measured: the ledger
    *  books its realized P&L as NULL, so the projection must be unknown too. */
   readonly entryOverheadKnown?: boolean | undefined;
+  /** False when a live pool leg charges a Token-2022 transfer fee (or its mint
+   *  data is unreadable): the mark/pending readers price GROSS amounts while
+   *  the close withdraws the exclude-transfer-fee amounts. Unknown, not a sign. */
+  readonly transferFeeKnown?: boolean | undefined;
   readonly ageMs: number;
   /** Paper and live close models debit different real costs. */
   readonly paperTrading: boolean;
@@ -306,11 +310,18 @@ export interface TaExhaustionNetPnlInput {
  * label and the optional P&L gate read; it is deliberately not a ledger value
  * (the close measures the real withdrawal). Unknown inputs (an unpriced or
  * fallback mark, unreadable pending income, a live row without a measured
- * entry overhead, a non-finite gross) return NaN — the caller then labels the
+ * entry overhead, a transfer-fee leg whose net withdrawal differs from the
+ * gross mark, a non-finite gross) return NaN — the caller then labels the
  * outcome unknown and the gate fails closed.
  */
 export function taExhaustionNetPnlUsd(input: TaExhaustionNetPnlInput): number {
-  if (input.markKnown === false || input.entryOverheadKnown === false) return Number.NaN;
+  if (
+    input.markKnown === false ||
+    input.entryOverheadKnown === false ||
+    input.transferFeeKnown === false
+  ) {
+    return Number.NaN;
+  }
   const gross =
     input.currentValueUsd +
     input.cumulativeFeesClaimedUsd +

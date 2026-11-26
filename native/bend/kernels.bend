@@ -280,10 +280,14 @@ def ta_loss_c(
   )
 
 # Provenance: a real on-chain mark AND readable pending fees/rewards AND a
-# measured entry overhead. Any unknown makes the projection unknown (the TS
-# returns NaN; a live close without overhead books NULL realized).
-def ta_known(mark_known: Bool, pending_known: Bool, overhead_known: Bool) -> Bool:
-  Bool.and(mark_known, Bool.and(pending_known, overhead_known))
+# measured entry overhead AND no transfer-fee leg (the close withdraws net
+# amounts, so a fee leg makes the gross mark unknown). Any unknown makes the
+# projection unknown (the TS returns NaN; a live close without overhead books
+# NULL realized).
+def ta_known(
+  mark_known: Bool, pending_known: Bool, overhead_known: Bool, net_known: Bool,
+) -> Bool:
+  Bool.and(mark_known, Bool.and(pending_known, Bool.and(overhead_known, net_known)))
 
 # 0n unknown / 1n losing / 2n profit-exhaustion (net >= 0).
 def ta_label(+loss_c: Nat, known: Bool) -> Nat:

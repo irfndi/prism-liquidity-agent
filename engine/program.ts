@@ -11378,6 +11378,22 @@ export const program = Effect.gen(function* () {
               Effect.catch(() => Effect.succeed(Number.NaN)),
             );
           }
+          // A Token-2022 transfer-fee leg makes the mark/pending USD (gross
+          // amounts) differ from the close withdrawal (exclude-transfer-fee
+          // amounts). Mint authorities are cached; a fee leg or an unreadable
+          // mint makes the projection unknown rather than guessing a sign.
+          function readTaNetAmountsKnown(position: PositionRecord): Effect.Effect<boolean, never> {
+            if (!taLiveAccounting(position)) return Effect.succeed(true);
+            return Effect.all(
+              [adapter.getMintAuthorities(pool.tokenX), adapter.getMintAuthorities(pool.tokenY)],
+              { concurrency: 2 },
+            ).pipe(
+              Effect.map(
+                ([x, y]) => x.transferFeeEnabled !== true && y.transferFeeEnabled !== true,
+              ),
+              Effect.catch(() => Effect.succeed(false)),
+            );
+          }
           function checkTaExhaustionExit(
             closes: readonly number[],
             position: PositionRecord,
@@ -11390,9 +11406,13 @@ export const program = Effect.gen(function* () {
               if (taExhaustionVote({ closes, ageMs, policy }) === null) return null;
               const liveAccounting = taLiveAccounting(position);
               const rebalanceCostsUsd = yield* readTaRebalanceCosts(position);
-              const [pendingFeesUsd, pendingRewardsUsd] = yield* Effect.all(
-                [readTaPendingFeesUsd(position), readTaPendingRewardsUsd(position)],
-                { concurrency: 2 },
+              const [pendingFeesUsd, pendingRewardsUsd, netAmountsKnown] = yield* Effect.all(
+                [
+                  readTaPendingFeesUsd(position),
+                  readTaPendingRewardsUsd(position),
+                  readTaNetAmountsKnown(position),
+                ],
+                { concurrency: 3 },
               );
               return maybeTaExhaustionExit({
                 poolAddress,
@@ -11413,6 +11433,7 @@ export const program = Effect.gen(function* () {
                   entryOverheadKnown:
                     !(liveAccounting && position.positionPubKey !== null) ||
                     position.entryOverheadUsd != null,
+                  transferFeeKnown: netAmountsKnown,
                   ageMs,
                   paperTrading: !liveAccounting,
                   swapCostPct: config.runnerSwapCostPct,
