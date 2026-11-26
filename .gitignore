@@ -84,5 +84,6 @@ mcp-server/package-lock.json
 
 # Formal verification artifacts (fetched / regenerated)
 native/tla/tla2tools.jar
+native/tla/*_TTrace_*
 native/tla/Ledger_TTrace_*
 native/tla/states/
