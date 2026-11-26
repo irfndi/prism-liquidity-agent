@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import fs from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService, RevenueConfigService, type RevenueConfig } from "../engine/services.js";
@@ -49,16 +51,11 @@ function buildLayer(
   >;
 }
 
-// readApiKey() reads ${PRISM_CONFIG_DIR}/credentials.json via fs.readFileSync;
-// stub just that path so no test touches the real user config directory.
+// readApiKey() reads ${PRISM_CONFIG_DIR}/credentials.json. A real temp file
+// (see the hooks below) exercises the real read and never touches the user's
+// config directory.
 function mockCredentialsFile(apiKey = "test-api-key"): void {
-  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-  vi.spyOn(fs, "readFileSync").mockImplementation(((path: fs.PathOrFileDescriptor) => {
-    if (String(path).includes("credentials.json")) {
-      return JSON.stringify({ apiKey });
-    }
-    throw new Error(`ENOENT: no such file: ${String(path)}`);
-  }) as typeof fs.readFileSync);
+  writeFileSync(join(credentialsDir, "credentials.json"), JSON.stringify({ apiKey }));
 }
 
 function okResponse(body: any): Response {
@@ -79,7 +76,11 @@ function runGetConfig(
   );
 }
 
+let credentialsDir: string;
+
 beforeEach(async () => {
+  credentialsDir = mkdtempSync(join(tmpdir(), "prism-credentials-"));
+  vi.stubEnv("PRISM_CONFIG_DIR", credentialsDir);
   // Fresh module instance per test so the service's module-level in-memory
   // cache singleton starts empty (same pattern as revenue-config-service.test.ts).
   vi.resetModules();
@@ -91,6 +92,8 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
   vi.useRealTimers();
+  vi.unstubAllEnvs();
+  rmSync(credentialsDir, { recursive: true, force: true });
 });
 
 // ─── parseRevenueConfig — fee wallet field extraction ───────────────────────

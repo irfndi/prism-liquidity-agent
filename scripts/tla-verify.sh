@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# TLA+ verification: the ledger/halt model and the TA-exhaustion gate model,
-# plus the negative controls proving each model still detects the regression it
-# was written for.
+# TLA+ verification: the ledger/halt model, the EXIT/HOLD/ROTATE policy model,
+# the RPC retry/circuit-breaker model, and the TA-exhaustion gate model — each
+# with the negative control that proves the model still detects the defect it
+# was written for. (Also called by scripts/verify.sh.)
 #
 # Standalone (`bun run verify:tla`) and called by scripts/verify.sh.
 set -euo pipefail
@@ -111,3 +112,28 @@ if ! grep -q "Invariant NoLossTaClose is violated" "$WORK/tlc-ta-buggy.log"; the
   exit 1
 fi
 echo "ok: buggy TA-exhaustion model violates NoLossTaClose (the #237 regression, model-checked)"
+
+# ── RPC resilience (retry budget + circuit breaker) ─────────────────────────
+echo "== TLA+ resilience model (must pass) =="
+(cd "$TLA_DIR" && "${TLC[@]}" -config ResilienceFixed.cfg Resilience.tla > "$WORK/resilience-fixed.log" 2>&1) || {
+  echo "FAIL: resilience model violated an invariant"
+  tail -n 30 "$WORK/resilience-fixed.log"
+  exit 1
+}
+echo "ok: ResilienceFixed retries only rate-limited errors, bounds retries, never opens on a rejected call or an intermediate retry, and never strikes a caller-side error"
+
+echo "== TLA+ buggy resilience model (must fail) =="
+set +e
+(cd "$TLA_DIR" && "${TLC[@]}" -config ResilienceBuggy.cfg Resilience.tla > "$WORK/resilience-buggy.log" 2>&1)
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: the buggy resilience model passed — a business error opening the breaker is not detected"
+  exit 1
+fi
+if ! grep -q "Invariant LocalErrorDoesNotStrike is violated" "$WORK/resilience-buggy.log"; then
+  echo "FAIL: the buggy resilience model failed for the wrong reason (exit $rc)"
+  tail -n 30 "$WORK/resilience-buggy.log"
+  exit 1
+fi
+echo "ok: buggy resilience lets a caller-side error strike the breaker (the missing isRetriable predicate)"

@@ -15,6 +15,8 @@ import {
   clampThreshold,
   nudgeThreshold,
   driftGateRejected,
+  entryMomentumBoost,
+  normalEntryConfidence,
   MIN_FEE_IL_EVOLVED_MIN,
   MIN_FEE_IL_EVOLVED_MAX,
   MAX_FEE_IL_RATIO,
@@ -30,7 +32,7 @@ import {
   type TaExhaustionPolicy,
 } from "../engine/ta-exhaustion.js";
 import { paperCloseCostsUsd } from "../engine/fee-capture.js";
-import { isBendAvailable, runBendNat, runBendBool, toNat } from "./bend-parity-harness.js";
+import { isBendAvailable, runBendNat, runBendBool, toMilli, toNat } from "./bend-parity-harness.js";
 
 const BEND = isBendAvailable();
 const describeIf = BEND ? describe : describe.skip;
@@ -439,5 +441,58 @@ describeIf("bend parity", () => {
     expect(runBendNat("K.exit_order(True{}, False{}, False{})")).toBe(
       BigInt(tsExitOrder(true, false, false)),
     );
+  });
+
+  // Momentum credit and the normal-ENTER confidence (strategy-service.ts
+  // entryMomentumBoost / normalEntryConfidence). Vectors span the thousandths
+  // range, including sub-unit drift: 2 bins into a 20-bin reference at the
+  // default 0.05 weight is 0.005, which a coarser fixed point truncated to zero.
+  it("momentum boost is bounded and never credits a falling pool (kernels.bend:momentum_scaled)", () => {
+    for (const [drift, ref, weight] of [
+      [-30, 20, 0.05],
+      [0, 20, 0.05],
+      [1, 20, 0.05],
+      [1, 20, 0.1],
+      [2, 20, 0.05],
+      [5, 20, 0.2],
+      [20, 20, 0.05],
+      [500, 20, 0.05],
+    ] as const) {
+      const ts = entryMomentumBoost(drift, ref, weight);
+      const sign = drift < 0 ? "True{}" : "False{}";
+      expect(
+        runBendNat(`K.momentum_scaled(${sign}, ${Math.abs(drift)}n, ${ref}n, ${toMilli(weight)})`),
+      ).toBe(BigInt(Math.round(ts * 1000)));
+    }
+  });
+
+  it("normal-ENTER confidence floors, lifts, and caps at 0.85 (kernels.bend:normal_conf_milli)", () => {
+    const opts = { referenceBins: 20, confBoost: 0.05 };
+    for (const [feeIl, drift] of [
+      [0, 0],
+      [2, 20],
+      [2, -40],
+      [1.2, 1],
+      [1.2, 2],
+      [1.25, 0],
+      [1.25, 1],
+      [10, 0],
+      // Absurd fees for the ceiling pin. Keep the magnitude small: Bend's Nat is
+      // unary, and `toMilli(20_000)` is a 20-million-successor literal that times
+      // the prover out without testing anything the 40x case does not.
+      [40, 20],
+      [1.2, 0],
+      [2.4, 0],
+    ] as const) {
+      const ts = normalEntryConfidence(feeIl, drift, opts);
+      const sign = drift < 0 ? "True{}" : "False{}";
+      expect(
+        runBendNat(
+          `K.normal_conf_milli(${toMilli(feeIl)}, ${sign}, ${Math.abs(drift)}n, 20n, ${toMilli(
+            opts.confBoost,
+          )})`,
+        ),
+      ).toBe(BigInt(Math.round(ts * 1000)));
+    }
   });
 });

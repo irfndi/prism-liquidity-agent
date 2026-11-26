@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # The verification gate. Anything that claims to work must pass ALL of it:
 #
+#   0. toolchain matrix            — coupled pins still agree (see
+#                                    scripts/check-toolchain.ts)
 #   1. typecheck + lint + format   — the code is well-formed
 #   2. unit/property tests         — the accounting identities hold
 #   3. Bend proofs                 — the PnL/strategy laws are proved, not sampled
-#   4. TLA+ (fixed models)         — ledger + TA-exhaustion invariants/liveness hold
+#   4. TLA+ (fixed models)         — ledger, policy, TA-exhaustion and RPC-resilience
+#                                    invariants/liveness hold
 #   5. TLA+ (buggy models)         — MUST fail, proving each model detects its regression
 #
 # Step 5 is the negative control. A verification suite that cannot fail is
@@ -13,6 +16,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BEND="${BEND_BIN:-$HOME/.bend/bin/bend}"
+echo "== 0/5 toolchain matrix =="
+bun run check:toolchain
+
 echo "== 1/5 typecheck + lint =="
 bun run lint
 

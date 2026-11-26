@@ -354,3 +354,82 @@ law hard_floor_survives_high_evolution:
 
 law hard_floor_at_exact_boundary:
   {K.with_hard_floor(120n, 120n) == 120n : Nat}
+
+# 12. Entry momentum (normal/market lane): the boost is bounded and can only
+# ever help a RISING pool. A falling pool keeps the static confidence — the
+# drift gate rejects it anyway, but nothing here may reward the fall. Units
+# are thousandths, so 0.05 = 50n and 0.565 = 565n.
+
+# A falling pool gets no credit, whatever its magnitude.
+law momentum_negative_never_credits:
+  for m: Nat
+  {K.momentum_scaled(True{}, m, 20n, 50n) == 0n : Nat}
+
+law momentum_zero_drift_quiet:
+  {K.momentum_scaled(False{}, 0n, 20n, 50n) == 0n : Nat}
+
+# Unknown reference (no bin history) contributes zero instead of dividing.
+law momentum_unknown_reference_quiet:
+  {K.momentum_scaled(False{}, 20n, 0n, 50n) == 0n : Nat}
+
+# A quarter of the reference earns a quarter of the weight (0.25 x 0.20 = 0.05).
+law momentum_quarter_reference:
+  {K.momentum_scaled(False{}, 5n, 20n, 200n) == 50n : Nat}
+
+# Sub-unit drift keeps its fraction: 2/20 x 0.05 = 0.005 exactly. Truncating
+# this is the defect the thousandths unit exists to prevent (hundredths gave 0).
+law momentum_sub_unit_kept:
+  {K.momentum_scaled(False{}, 2n, 20n, 50n) == 5n : Nat}
+
+# The smallest real momentum rounds UP: 1/20 x 0.05 = 0.0025, and the TS
+# helper rounds to 0.003. Flooring returned 0.002 and broke parity here.
+law momentum_rounds_half_up:
+  {K.momentum_scaled(False{}, 1n, 20n, 50n) == 3n : Nat}
+
+law momentum_rounds_down_below_half:
+  {K.momentum_scaled(False{}, 1n, 20n, 10n) == 1n : Nat}
+
+# At and past the reference the boost saturates at the weight, never above it.
+law momentum_saturates_at_reference:
+  {K.momentum_scaled(False{}, 20n, 20n, 50n) == 50n : Nat}
+
+law momentum_past_reference_saturates:
+  {K.momentum_scaled(False{}, 500n, 20n, 50n) == 50n : Nat}
+
+# Static confidence floor: no fees, no momentum -> 0.500.
+law confidence_static_floor:
+  {K.normal_conf_milli(0n, False{}, 0n, 20n, 50n) == 500n : Nat}
+
+# feeIl 2.00 adds 0.100 and full momentum adds 0.050 -> 0.650, exactly the floor
+# this feature exists to let a good pool reach.
+law confidence_momentum_reaches_floor:
+  {K.normal_conf_milli(2000n, False{}, 20n, 20n, 50n) == 650n : Nat}
+
+# The parity vector from the TS source: feeIl 1.20, +2 bins of drift -> 0.565.
+law confidence_sub_unit_momentum:
+  {K.normal_conf_milli(1200n, False{}, 2n, 20n, 50n) == 565n : Nat}
+
+# The same pool one bin into the trend: 0.5625 rounds to 0.563, not 0.562.
+law confidence_rounds_half_up:
+  {K.normal_conf_milli(1200n, False{}, 1n, 20n, 50n) == 563n : Nat}
+
+# Contributions are combined BEFORE the single rounding: feeIl 1.25 (0.0625) plus
+# 1 bin of drift (0.0025) is 0.565 exactly. Rounding each half up first gave
+# 0.063 + 0.003 = 0.566 and broke parity with `normalEntryConfidence`.
+law confidence_combined_rounding:
+  {K.normal_conf_milli(1250n, False{}, 1n, 20n, 50n) == 565n : Nat}
+
+# The same pool falling keeps the static 0.560: no momentum credit.
+law confidence_falling_no_lift:
+  {K.normal_conf_milli(1200n, True{}, 40n, 20n, 50n) == 560n : Nat}
+
+# The 0.850 ceiling holds no matter how good the fees get, boost or not.
+law confidence_ceiling_pin:
+  {K.normal_conf_milli(10000n, False{}, 0n, 20n, 50n) == 850n : Nat}
+
+law confidence_ceiling_holds_with_momentum:
+  {K.normal_conf_milli(20000n, False{}, 20n, 20n, 50n) == 850n : Nat}
+
+# Better fee quality never lowers confidence.
+law confidence_monotone_in_fee_il:
+  {Nat.is_le(K.normal_conf_milli(1200n, False{}, 0n, 20n, 50n), K.normal_conf_milli(2400n, False{}, 0n, 20n, 50n)) == True{} : Bool}

@@ -419,19 +419,20 @@ describe("live wallet-read entry gate", () => {
     readonly executed: boolean;
   }
 
-  function runCycleFull<R>(layer: Layer.Layer<R, never, never>): Promise<{
-    readonly decisions: ReadonlyArray<FullDecision>;
-  }> {
-    const test = Effect.gen(function* () {
-      yield* Effect.raceFirst(program, Effect.sleep(2_000));
-      const audit = yield* AuditService;
-      const decisions = yield* audit.getRecentDecisions(50);
-      return { decisions: asOwner<FullDecision[]>(decisions) };
-    });
-    return Effect.runPromise(
-      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
-    );
+  const cycleFullEffect = Effect.gen(function* () {
+    yield* Effect.raceFirst(program, Effect.sleep(2_000));
+    const audit = yield* AuditService;
+    const decisions = yield* audit.getRecentDecisions(50);
+    return { decisions: asOwner<FullDecision[]>(decisions) };
+  });
+
+  // Typing the layer from the effect's own requirements lets `Effect.provide`
+  // discharge them to `never`; a bare `<R>` parameter left `Exclude<Req, R>`
+  // unresolved and forced the assertion this signature replaces.
+  function runCycleFull(
+    layer: Layer.Layer<Effect.Services<typeof cycleFullEffect>, never, never>,
+  ): Promise<{ readonly decisions: ReadonlyArray<FullDecision> }> {
+    return Effect.runPromise(Effect.provide(cycleFullEffect, layer));
   }
 
   function enterCandidateAdapter(balance: Effect.Effect<number, Error>): AdapterApi {
@@ -640,26 +641,22 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
     } as AdapterApi;
   }
 
-  function runRecaptureCycle<R>(layer: Layer.Layer<R, never, never>) {
-    const test = Effect.gen(function* () {
-      const db = yield* DbService;
-      // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
-      yield* seedExitingPosition(db as never);
-      yield* Effect.raceFirst(program, Effect.sleep(2_000));
-      const audit = yield* AuditService;
-      const state = yield* AgentStateService;
-      const decisions = yield* audit.getRecentDecisions(50);
-      const snapshot = yield* state.getSnapshot();
-      return { decisions: asOwner<FullDecision[]>(decisions), snapshot };
-    });
-    return Effect.runPromise(
-      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<
-        { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
-        Error,
-        never
-      >,
-    );
+  const recaptureCycleEffect = Effect.gen(function* () {
+    const db = yield* DbService;
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
+    yield* seedExitingPosition(db as never);
+    yield* Effect.raceFirst(program, Effect.sleep(2_000));
+    const audit = yield* AuditService;
+    const state = yield* AgentStateService;
+    const decisions = yield* audit.getRecentDecisions(50);
+    const snapshot = yield* state.getSnapshot();
+    return { decisions: asOwner<FullDecision[]>(decisions), snapshot };
+  });
+
+  function runRecaptureCycle(
+    layer: Layer.Layer<Effect.Services<typeof recaptureCycleEffect>, never, never>,
+  ) {
+    return Effect.runPromise(Effect.provide(recaptureCycleEffect, layer));
   }
 
   afterEach(() => {
@@ -764,17 +761,15 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
     getPoolData: () => Effect.succeed(enterableDatapi()),
   };
 
-  function runCycle<R>(layer: Layer.Layer<R, never, never>) {
-    const test = Effect.gen(function* () {
-      yield* Effect.raceFirst(program, Effect.sleep(2_000));
-      const audit = yield* AuditService;
-      const decisions = yield* audit.getRecentDecisions(100);
-      return { decisions: asOwner<FullDecision[]>(decisions) };
-    });
-    return Effect.runPromise(
-      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
-    );
+  const cycleEffect = Effect.gen(function* () {
+    yield* Effect.raceFirst(program, Effect.sleep(2_000));
+    const audit = yield* AuditService;
+    const decisions = yield* audit.getRecentDecisions(100);
+    return { decisions: asOwner<FullDecision[]>(decisions) };
+  });
+
+  function runCycle(layer: Layer.Layer<Effect.Services<typeof cycleEffect>, never, never>) {
+    return Effect.runPromise(Effect.provide(cycleEffect, layer));
   }
 
   afterEach(() => {

@@ -256,17 +256,42 @@ describe("drift gate in the decision loop", () => {
       const blockExpiresAt = Date.now() + 2_000; // 2s remaining
       yield* db.setMetadata(`token_block:${TOKEN_A}`, String(blockExpiresAt));
       yield* db.setMetadata(`token_block:${TOKEN_B}`, String(blockExpiresAt));
-      yield* Effect.raceFirst(program, Effect.sleep(8_000)); // wide window: parallel-load flake guard (real-clock expiry)
       const audit = yield* AuditService;
-      const decisions = yield* audit.getRecentDecisions(300);
-      return asOwner<
-        ReadonlyArray<{
-          action: string;
-          reasoning: string;
-          executed: boolean;
-          poolAddress: string;
-        }>
-      >(decisions);
+      // Wait for the EVENT, not the clock. A fixed race window made this test
+      // fail on any loaded machine: the block is real-time while cycle
+      // throughput collapses under 16-way file parallelism, so 8s could yield
+      // exactly one scan cycle (2 token-block decisions) and no drift verdict.
+      // Polling the audit trail succeeds as soon as the rejection lands.
+      //
+      // 45s is deliberate, not slack: the seeded block must expire AND enough
+      // cycles must run to build the drift. Idle, that is ~2s; under a fully
+      // loaded suite a single scan cycle has been observed to take >8s, so a
+      // 15s budget failed while 25s passed. The `it` timeout stays well above
+      // the budget so a real failure reports the poll verdict, not a harness
+      // abort.
+      const POLL_ATTEMPTS = 180; // x 250ms = 45s
+      const waitForDriftRejection = Effect.gen(function* () {
+        for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt++) {
+          const decisions = yield* audit.getRecentDecisions(300);
+          if (decisions.some((d) => d.action === "ENTER" && d.reasoning.includes("[drift-gate]"))) {
+            return asOwner<
+              ReadonlyArray<{
+                action: string;
+                reasoning: string;
+                executed: boolean;
+                poolAddress: string;
+              }>
+            >(decisions);
+          }
+          yield* Effect.sleep(250);
+        }
+        return yield* Effect.fail(
+          new Error(
+            `no [drift-gate] ENTER decision within ${POLL_ATTEMPTS * 250}ms of scan cycles`,
+          ),
+        );
+      });
+      return yield* Effect.raceFirst(program, waitForDriftRejection);
     });
     // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const decisions = (await Effect.runPromise(
@@ -291,12 +316,22 @@ describe("drift gate in the decision loop", () => {
     const driftRejections = decisions.filter(
       (d) => d.action === "ENTER" && d.reasoning.includes("[drift-gate]"),
     );
-    expect(driftRejections.length).toBeGreaterThan(0);
+    // A bare length assertion hides what the loop actually decided under load;
+    // the failure summary names every recorded action so the next failure is
+    // self-describing instead of a re-run-and-guess.
+    const observed = decisions.map((d) => `${d.action}:${d.reasoning.slice(0, 90)}`).join("\n");
+    expect(
+      driftRejections.length,
+      `no [drift-gate] ENTER decision in ${decisions.length} recorded decisions:\n${observed}`,
+    ).toBeGreaterThan(0);
     expect(driftRejections[0]!.reasoning).toContain("falling price, no momentum entry");
     const neutralDrift = decisions.filter(
       (d) =>
         d.action === "ENTER" && d.poolAddress === NEUTRAL && d.reasoning.includes("[drift-gate]"),
     );
     expect(neutralDrift.length).toBe(0);
-  }, 30_000);
+    // 45s poll budget + layer setup + audit reads. The harness timeout must sit
+    // above the budget, or a real failure aborts as a generic timeout instead of
+    // reporting the polling verdict.
+  }, 90_000);
 });

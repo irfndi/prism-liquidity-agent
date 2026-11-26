@@ -24,6 +24,8 @@ bun run setup          # interactive .env wizard
 | `bun run lint` | tsc --noEmit + oxlint (engine ops bench cli) |
 | `bun run format` | oxfmt --write (engine ops bench cli) |
 | `bun run build` | tsdown -> dist/index.mjs |
+| `bun run check:toolchain` | verify coupled pins (effect/tsgo, oxlint band, dlmm SDK, anti-slop bundles) |
+| `bun run verify` | the full gate: toolchain + lint + format + tests + Bend + TLA+ |
 
 ## Project Constraints
 

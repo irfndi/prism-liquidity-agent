@@ -1,12 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService, RevenueConfigService } from "../engine/services.js";
 import { asFetch, defaultAppConfig } from "./helpers.js";
-import fs from "fs";
 
 let RevenueConfigServiceLive: typeof import("../engine/revenue-config-service.js").RevenueConfigServiceLive;
+let credentialsDir: string;
 
 const originalFetch = globalThis.fetch;
 
@@ -25,21 +28,24 @@ function buildLayer(
   >;
 }
 
+// The service resolves its credentials path at module load, so the temp
+// PRISM_CONFIG_DIR must exist before the dynamic import below. A real file on
+// disk also exercises the real read instead of a spy whose overloads no longer
+// line up with @types/node's readFileSync.
 function mockCredentialsFile(apiKey = "test-api-key"): void {
-  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-  vi.spyOn(fs, "readFileSync").mockImplementation(((path: fs.PathOrFileDescriptor) => {
-    if (String(path).includes("credentials.json")) {
-      return JSON.stringify({
-        apiKey,
-        userId: "test-user",
-        createdAt: "2024-01-01T00:00:00Z",
-      });
-    }
-    throw new Error(`ENOENT: no such file: ${String(path)}`);
-  }) as typeof fs.readFileSync);
+  writeFileSync(
+    join(credentialsDir, "credentials.json"),
+    JSON.stringify({
+      apiKey,
+      userId: "test-user",
+      createdAt: "2024-01-01T00:00:00Z",
+    }),
+  );
 }
 
 beforeEach(async () => {
+  credentialsDir = mkdtempSync(join(tmpdir(), "prism-credentials-"));
+  vi.stubEnv("PRISM_CONFIG_DIR", credentialsDir);
   vi.resetModules();
   const mod = await import("../engine/revenue-config-service.js");
   RevenueConfigServiceLive = mod.RevenueConfigServiceLive;
@@ -48,6 +54,8 @@ beforeEach(async () => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  rmSync(credentialsDir, { recursive: true, force: true });
 });
 
 // ─── Paper mode: fail-open ──────────────────────────────────────────────────

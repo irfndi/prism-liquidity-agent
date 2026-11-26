@@ -14,7 +14,7 @@ env:
   # references it. The repository's bunfig.toml enables Bun 1.4's isolated
   # linker and shared global store. (Cloudflare R2 is deprecated for
   # distribution — account billing; releases publish to GitHub only.)
-  BUN_VERSION: 1.4.2
+  BUN_VERSION: 1.4.5
 
 permissions:
   contents: write
@@ -42,9 +42,44 @@ jobs:
           fi
           echo "→ package.json version matches tag: ${VERSION}"
 
+  # Typecheck once, in its own job. It used to run inside every one of the four
+  # test shards — four identical typechecks burning four runners.
+  lint:
+    needs: version-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate embedded sqlite-vec extension
+        run: bun run scripts/generate-vec-embed.ts linux x64
+
+      - name: Run lint
+        run: bun run lint
+
   test:
     needs: version-guard
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Split the engine test suite across parallel shards (Vitest --shard).
     # Each shard runs a disjoint subset of bench/**/*.test.ts; the whole suite
     # is only "green" when every shard passes. Run on the canary Bun runtime
@@ -65,20 +100,25 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Generate embedded sqlite-vec extension
         run: bun run scripts/generate-vec-embed.ts linux x64
-
-      - name: Run lint
-        run: bun run lint
 
       - name: Run tests (shard ${{ matrix.shard }}/${{ matrix.total }})
         run: bun run test -- --shard=${{ matrix.shard }}/${{ matrix.total }}
 
   build-bundles:
-    needs: [version-guard, test]
+    needs: [version-guard, lint, test]
     env:
       VERSION: ${{ needs.version-guard.outputs.version }}
     strategy:
@@ -105,8 +145,16 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Install platform sqlite-vec extension
         # Same reason as the canary job: the isolated linker + global store do
@@ -140,7 +188,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [version-guard, test, build-bundles]
+    needs: [version-guard, lint, test, build-bundles]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version-guard.outputs.version }}
@@ -173,6 +221,16 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
+
+      # Release rewrites package.json's version before installing, so the
+      # install stays unfrozen; the cache is still keyed on the lockfile.
+      - name: Cache Bun install artifacts
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
 
       - name: Install dependencies
         run: bun install

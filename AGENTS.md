@@ -64,7 +64,7 @@ There are also optional peripheral subprojects:
 - **Build:** `tsdown` (root engine entry → `dist/index.mjs`).
 - **Lint:** `oxlint` with `typescript`/`unicorn`/`oxc` plugins; config in `.oxlintrc.json`.
 - **Format:** `oxfmt`; config in `.oxfmtrc.json`.
-- **Test:** Vitest 4.x. Engine tests require Bun and fail fast if run under Node.
+- **Test:** Vitest 5.x. Engine tests require Bun and fail fast if run under Node.
 
 ## Key configuration files
 
@@ -78,7 +78,7 @@ There are also optional peripheral subprojects:
 | `.oxlintrc.json`                                      | `oxlint` rules: `correctness: error`, `no-unused-vars` and `require-yield` off.                                                               |
 | `.oxfmtrc.json`                                       | `oxfmt` config (empty `ignorePatterns`).                                                                                                      |
 | `.env.example`                                        | Example env file. **Incomplete** — canonical defaults and full env set live in `engine/config-service.ts`.                                    |
-| `Dockerfile`                                          | Multi-stage Bun-based image; runtime uses `oven/bun:1.4.2-slim`, installs `libsqlite3-0` + `ca-certificates`, runs as non-root `agent` user. |
+| `Dockerfile`                                          | Multi-stage Bun-based image; runtime uses `oven/bun:1.4.5-slim`, installs `libsqlite3-0` + `ca-certificates`, runs as non-root `agent` user. |
 | `scripts/prism.sh`                                    | The `prism` binary wrapper; resolves install root, sets `PRISM_INSTALL_DIR`, then runs `cli/index.ts`.                                        |
 | `cloudflare/package.json`                             | Separate subproject for API + Telegram workers.                                                                                               |
 | `cloudflare/wrangler.toml` / `wrangler.telegram.toml` | Cloudflare Worker configs.                                                                                                                    |
@@ -120,6 +120,7 @@ bun run test                # vitest run (bench/**/*.test.ts); REQUIRES Bun
 bun run test -- -t "name"   # single test by name
 bun run test -- bench/risk.test.ts
 bun run test:watch          # vitest interactive TUI
+bun run check:toolchain     # coupled pins still agree (effect↔tsgo, dlmm↔web3/anchor, anti-slop bundles)
 bun run coverage            # vitest --coverage
 bun run backtest            # bun run ops/backtest.ts
 bun run dev                 # bun --watch engine/index.ts (see Direct-execution guard below)
@@ -359,21 +360,25 @@ Veto-fetch failures log the underlying gateway error (Effect wraps rejections in
 
 ## Testing
 
-- **The gate is `bun run verify`** (`scripts/verify.sh`): typecheck + lint + format, the full vitest
-  suite, `bend PROOF.bend`, TLC on `native/tla/LedgerFixed.cfg`, `PolicyFixed.cfg`,
-  `TaExhaustionFixed.cfg`, `TaExhaustionWin.cfg`, `TaExhaustionToxic.cfg`, and TLC on
-  `LedgerBuggy.cfg` + `PolicyBuggy.cfg` + `TaExhaustionBuggy.cfg` which **must fail**. Gate 5 is the
-  negative control — if a buggy model ever passes, the model stopped detecting the regression it
-  exists for. A change that cannot pass all five is not done.
+- **The gate is `bun run verify`** (`scripts/verify.sh`): the toolchain matrix
+  (`check:toolchain`), typecheck + lint + format, the full vitest suite, `bend PROOF.bend`, TLC on
+  every fixed config (`LedgerFixed`, `PolicyFixed`, `TaExhaustionFixed`, `TaExhaustionWin`,
+  `TaExhaustionToxic`, `ResilienceFixed`), and TLC on every buggy config (`LedgerBuggy`,
+  `PolicyBuggy`, `TaExhaustionBuggy`, `ResilienceBuggy`) which **must fail**. The buggy configs are
+  the negative controls — if one ever passes, the model stopped detecting the regression it exists
+  for. A change that cannot pass all gates is not done.
 - Formal assets: `native/bend/{kernels,LAWS,PROOF}.bend` (strategy + PnL + selection + hold +
-  TA-exhaustion policy laws, proved by closed evaluation; a wrong constant makes `bend` exit 1) and
-  `native/tla/`: `Ledger.tla` (accounting + rolling halt), `Policy.tla` (EXIT/HOLD/ROTATE decision
-  table, 10,648 observations), and `TaExhaustion.tla` (the TA gate's temporal contract: no
-  unqualified loss close — a measured fee/IL above the floor is the only exception and the gate
-  defaults off — plus the hold floor, honest-gate liveness, and a must-fail pre-#237 control). Each
-  has a fixed config that must pass and a buggy config that must fail — the buggy configs are the
-  regression each model exists for. Bend's `Nat` is unary: keep kernel arithmetic in small units
-  (hours, not seconds) or the prover will not finish.
+  TA-exhaustion policy + entry-momentum laws, proved by closed evaluation; a wrong constant makes
+  `bend` exit 1) and `native/tla/`: `Ledger.tla` (accounting + rolling halt), `Policy.tla`
+  (EXIT/HOLD/ROTATE decision table, 10,648 observations), `TaExhaustion.tla` (the TA gate's temporal
+  contract: no unqualified loss close — a measured fee/IL above the floor is the only exception and
+  the gate defaults off — plus the hold floor, honest-gate liveness, and a must-fail pre-#237
+  control), and `Resilience.tla` (the RPC retry budget + circuit breaker, matching the runtime's two
+  classifiers: `isRpcNetworkError` strikes on rate limits, HTTP 4xx/5xx and transport failures,
+  `isRetriableError` retries the rate-limited class only, a caller-side error does neither, and a
+  refused call never opens the breaker). Each has a fixed config that must pass and a buggy config
+  that must fail — the buggy configs are the regression each model exists for. Bend's `Nat` is unary:
+  keep kernel arithmetic in small units (hours, not seconds) or the prover will not finish.
 - Add a law/spec **before or with** a policy change, not after: the negative-control config is what
   proves the model still detects the failure it was written for.
 - Engine tests live in `bench/**/*.test.ts`. There is no `tests/` directory for the engine.
@@ -426,7 +431,7 @@ Required secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 
 ### Docker
 
-The `Dockerfile` builds the engine bundle with `oven/bun:1.4.2-slim`, using a self-contained hoisted install for the copied runtime artifact, then copies `dist/`, `node_modules/` and `package.json` into a runtime stage that installs `libsqlite3-0` and `ca-certificates`. The container runs as the `agent` user and executes `bun dist/index.mjs`.
+The `Dockerfile` builds the engine bundle with `oven/bun:1.4.5-slim`, using a self-contained hoisted install for the copied runtime artifact, then copies `dist/`, `node_modules/` and `package.json` into a runtime stage that installs `libsqlite3-0` and `ca-certificates`. The container runs as the `agent` user and executes `bun dist/index.mjs`.
 
 ## Security and privacy
 

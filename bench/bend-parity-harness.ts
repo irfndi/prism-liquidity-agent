@@ -17,6 +17,18 @@ export function toNat(v: number): string {
   return `${Math.round(v * 100)}n`;
 }
 
+/**
+ * TS float -> thousandths Nat literal, e.g. 0.565 -> "565n".
+ *
+ * Used by the entry-momentum kernels: at hundredths a 2-bin drift on a 20-bin
+ * reference at the default 0.05 weight is 0.005 and truncates to zero, so the
+ * kernel would disagree with `normalEntryConfidence` on the smallest real
+ * momentum either side of the trip line.
+ */
+export function toMilli(v: number): string {
+  return `${Math.round(v * 1000)}n`;
+}
+
 function bendEnv(): NodeJS.ProcessEnv {
   const home = process.env.HOME ?? "";
   return { ...process.env, PATH: `${home}/.bend/bin:${process.env.PATH ?? ""}` };

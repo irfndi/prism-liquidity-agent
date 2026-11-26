@@ -380,6 +380,93 @@ def maturity_gate_s(+measured_s: Nat, +fallback_s: Nat, nonzero: Bool) -> Nat:
 def maturity_gate_capped_s(+measured_s: Nat, +cap_s: Nat) -> Nat:
   Nat.min(measured_s, cap_s)
 
+# ── Entry momentum (normal / market lane) ────────────────────────────────
+# Ported from engine/strategy-service.ts `entryMomentumBoost` and
+# `normalEntryConfidence`.
+#
+# Fixed-point unit is THOUSANDTHS (0.565 = 565n, 0.05 = 50n, fee/IL 1.20 =
+# 1200n). Hundredths was not enough: a pool 2 bins into a 20-bin reference at
+# the default 0.05 weight earns 0.005 of confidence, which truncates to zero at
+# hundredths (2 x 5 / 20 = 0) and made the kernel disagree with the TS source
+# on any sub-unit drift. The repo's own parity rule is that the kernel proves
+# the same number as the source of truth, so the unit is 10x finer.
+#
+# `neg` carries the drift sign (Bend's Nat cannot hold it). A negative drift
+# contributes ZERO: there is no credit for falling prices. `ref = 0` is the
+# unknown-reference case, which contributes zero rather than dividing.
+#
+# The division ROUNDS to nearest, not down: `drift x weight / ref` at 1 x 50 / 20
+# is 0.0025 and TS rounds it to 3 thousandths, while flooring said 2. Both the
+# +1-bin and the +2-bin cases sit on this boundary, so flooring silently broke
+# parity on the smallest momentum the gate will ever see.
+def round_div(+num: Nat, +den: Nat) -> Nat:
+  Nat.div(Nat.add(num, Nat.div(den, 2n)), den)
+
+def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
+  match neg:
+    case True{}:
+      0n
+    case False{}:
+      match ref:
+        case 0n:
+          0n
+        case 1n+p:
+          round_div(Nat.mul(Nat.min(drift, 1n+p), weight_milli), 1n+p)
+
+# normalEntryConfidence: min(0.500 + feeIlRatio x 0.05 + momentum, 0.850).
+#
+# The two contributions are combined BEFORE the single rounding. Rounding them
+# separately and adding made feeIl 1.25 with 1 bin of drift return 566 while
+# `normalEntryConfidence` returns 0.565: each half-up rounded up, and the
+# fractional part of the drift disappeared twice.
+#
+#   milli = 500 + (feeMilli x ref + clamp(drift, ref) x weightMilli x 20) / (20 x ref)
+#
+# `fee_il_milli` is clamped at 7000 (fee/IL 7.0) first: at 7.0 the fee term alone
+# is 0.350, so `500 + 350` is the 850 ceiling and momentum cannot matter.
+# Clamping keeps `Nat.mul` small — unary arithmetic, and 20_000 fee x 20
+# reference builds 400k nodes for a number the ceiling discards anyway.
+def conf_ceiling_fee_milli() -> Nat:
+  7000n
+
+def conf_flat(+fee_il_milli: Nat) -> Nat:
+  Nat.min(
+    Nat.add(500n, round_div(Nat.min(fee_il_milli, conf_ceiling_fee_milli()), 20n)),
+    850n,
+  )
+
+# NOTE on exact halves: this kernel rounds the exact rational. The TS reference
+# carries IEEE-754 error, so an input whose exact result sits on .5 can land
+# just below it in JS (`0 + 0.0025` is 0.0024999... there) and `Math.round`
+# floors it. Those inputs are excluded from the parity vectors on purpose; a
+# law cannot encode a floating-point representation choice, and the money-path
+# decisions this gate informs turn on 0.65, not on the last thousandth.
+
+# `neg` is matched before `ref`: Bend cannot match a binder that follows an
+# earlier match in the same definition.
+def normal_conf_milli(+fee_il_milli: Nat, neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
+  match neg:
+    case True{}:
+      conf_flat(fee_il_milli)
+    case False{}:
+      match ref:
+        case 0n:
+          conf_flat(fee_il_milli)
+        case 1n+r:
+          Nat.min(
+            Nat.add(
+              500n,
+              round_div(
+                Nat.add(
+                  Nat.mul(Nat.min(fee_il_milli, conf_ceiling_fee_milli()), 1n+r),
+                  Nat.mul(Nat.min(drift, 1n+r), Nat.mul(weight_milli, 20n)),
+                ),
+                Nat.mul(20n, 1n+r),
+              ),
+            ),
+            850n,
+          )
+
 # Evolution may move a threshold, but a hard safety floor still bounds it:
 # `evolveThresholds` clamps to the band, then the safety floor applies.
 def with_hard_floor(+evolved: Nat, +hard_floor: Nat) -> Nat:
