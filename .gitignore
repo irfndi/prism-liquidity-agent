@@ -81,3 +81,8 @@ mcp-server/package-lock.json
 .commandcode/
 .cgcignore
 .oh-my-plumb/
+
+# Formal verification artifacts (fetched / regenerated)
+native/tla/tla2tools.jar
+native/tla/Ledger_TTrace_*
+native/tla/states/

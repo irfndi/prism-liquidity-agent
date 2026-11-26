@@ -176,5 +176,61 @@ def loss_magnitude_fires(pnl_neg: Bool, +pnl_mag: Nat, +floor_mag: Nat) -> Bool:
 def dust_exit_fires(floor_on: Bool, +mark: Nat, +floor: Nat) -> Bool:
   Bool.and(floor_on, Nat.is_lt(mark, floor))
 
+# ── PnL accounting (position lifecycle) ───────────────────────────────────
+# Ported from engine/adapter-service.ts `netWithdrawnUsd` /
+# `computeEntryOverheadUsd` and engine/pnl.ts `computeRealizedPnlUsd`.
+# Units: whole US cents (Nat). $19.88 is 1988n. Same fixed-point discipline as
+# the strategy kernels; the host keeps f64 dollars, the kernel owns the
+# PROVEN identity.
+#
+# Why it exists (live forensics 2026-11-26): entry measured the deposit only,
+# exit measured the whole wallet delta (which includes the rent refund for the
+# position, its bin arrays and its ATAs). A dead-flat round trip therefore
+# booked `rent` as profit — +16% on a $20 position — and the rolling halt
+# never armed. These kernels are the fix's contract.
+
+# Deposit-only realized value for an exit: measured gross back minus the cash
+# the entry spent beyond its deposit. Saturating Nat.sub IS the max(0, …)
+# floor: overhead larger than the withdrawal yields 0, never a negative one.
+def net_withdrawn(+gross_c: Nat, +overhead_c: Nat) -> Nat:
+  Nat.sub(gross_c, overhead_c)
+
+# Realized PnL as an unsigned magnitude plus a direction, because Bend's Nat
+# has no negatives. `realized_gain_c` is what is left after covering the cost
+# basis; `realized_loss_c` is the shortfall. Exactly one is non-zero.
+def realized_gain_c(
+  +gross_c: Nat, +overhead_c: Nat, +prior_fees_c: Nat, +rewards_c: Nat, +deposit_c: Nat,
+) -> Nat:
+  Nat.sub(
+    Nat.add(Nat.add(net_withdrawn(gross_c, overhead_c), prior_fees_c), rewards_c),
+    deposit_c,
+  )
+
+def realized_loss_c(
+  +gross_c: Nat, +overhead_c: Nat, +prior_fees_c: Nat, +rewards_c: Nat, +deposit_c: Nat,
+) -> Nat:
+  Nat.sub(
+    deposit_c,
+    Nat.add(Nat.add(net_withdrawn(gross_c, overhead_c), prior_fees_c), rewards_c),
+  )
+
+# Rolling realized-PnL halt: arms strictly BELOW the threshold. The bug's
+# damage was not this predicate — it was feeding it rent-inflated input.
+def halt_armed(+rolling_neg: Bool, +rolling_mag: Nat, +threshold_mag: Nat) -> Bool:
+  match rolling_neg:
+    case True{}:
+      Nat.is_gt(rolling_mag, threshold_mag)
+    case False{}:
+      False{}
+
+# Break-even hold in whole DAYS from round-trip cost and fee APR, both in
+# basis points: days = cost_bps * 365 / apr_bps (floored).
+def break_even_days(+cost_bps: Nat, +apr_bps: Nat) -> Nat:
+  Nat.div(Nat.mul(cost_bps, 365n), apr_bps)
+
+# Entry cost basis gap: cash that left the wallet beyond the deposit.
+def entry_overhead_c(+spent_c: Nat, +deposit_c: Nat) -> Nat:
+  Nat.sub(spent_c, deposit_c)
+
 def main() -> Nat:
   clamp_thr(1392n, 30n, 300n)

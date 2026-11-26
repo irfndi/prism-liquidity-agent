@@ -94,3 +94,73 @@ law ta_single_signal_quiet:
 
 law ta_cold_start_quiet:
   {K.ta_exhausted(True{}, False{}, False{}) == False{} : Bool}
+
+# 5. PnL accounting: realized PnL must be a difference of LIKE-MEASURED cash.
+# The exit measures the whole wallet delta (deposit + rent refund + fees); the
+# entry must therefore subtract everything it spent beyond the deposit, or
+# refunded rent is booked as revenue. Representative point is the live
+# 2026-11-20 shape: $19.88 deposit, $3.00 rent+wrap gap, $22.88 measured back.
+
+# A dead-flat round trip books ZERO once the entry overhead is subtracted.
+law flat_round_trip_no_gain:
+  {K.realized_gain_c(2288n, 300n, 0n, 0n, 1988n) == 0n : Nat}
+
+law flat_round_trip_no_loss:
+  {K.realized_loss_c(2288n, 300n, 0n, 0n, 1988n) == 0n : Nat}
+
+# The regression, pinned: WITHOUT the subtraction the same flat round trip
+# books the rent as profit (+$3.00 on $19.88 = +15.1%).
+law rent_booked_as_profit_without_overhead:
+  {K.realized_gain_c(2288n, 0n, 0n, 0n, 1988n) == 300n : Nat}
+
+# Overhead is never a credit: subtracting it can only lower the value.
+law overhead_never_credits:
+  {K.net_withdrawn(2288n, 300n) == 1988n : Nat}
+
+law overhead_above_withdrawal_floors:
+  {K.net_withdrawn(200n, 300n) == 0n : Nat}
+
+# Genuine outcomes survive the correction.
+law real_loss_still_loss:
+  {K.realized_loss_c(1800n, 300n, 0n, 0n, 1988n) == 488n : Nat}
+
+law real_loss_not_a_gain:
+  {K.realized_gain_c(1800n, 300n, 0n, 0n, 1988n) == 0n : Nat}
+
+law real_gain_survives:
+  {K.realized_gain_c(2500n, 300n, 0n, 0n, 1988n) == 212n : Nat}
+
+law prior_fees_credit:
+  {K.realized_gain_c(2288n, 300n, 500n, 0n, 1988n) == 500n : Nat}
+
+# 6. Halt arming: strict-below only, and never on a non-loss.
+law halt_arms_on_real_loss:
+  {K.halt_armed(True{}, 488n, 350n) == True{} : Bool}
+
+law halt_quiet_at_threshold:
+  {K.halt_armed(True{}, 350n, 350n) == False{} : Bool}
+
+law halt_quiet_on_profit:
+  for m: Nat
+  {K.halt_armed(False{}, m, 350n) == False{} : Bool}
+
+# 7. Break-even hold: the arithmetic that decides whether a size/hold pair can
+# pay for its own round trip at all.
+law break_even_30bps_at_71pct:
+  {K.break_even_days(30n, 7100n) == 1n : Nat}
+
+law break_even_60bps_at_71pct:
+  {K.break_even_days(60n, 7100n) == 3n : Nat}
+
+law break_even_60bps_at_450pct:
+  {K.break_even_days(60n, 45000n) == 0n : Nat}
+
+law break_even_hotter_pool_not_longer:
+  {Nat.is_le(K.break_even_days(60n, 45000n), K.break_even_days(60n, 7100n)) == True{} : Bool}
+
+# 8. Entry overhead is the cash gap, saturating at zero.
+law entry_overhead_is_the_gap:
+  {K.entry_overhead_c(3171n, 2749n) == 422n : Nat}
+
+law entry_overhead_never_negative:
+  {K.entry_overhead_c(2000n, 2749n) == 0n : Nat}
