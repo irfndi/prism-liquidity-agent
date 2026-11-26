@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Database } from "bun:sqlite";
+import { netWithdrawnUsd } from "../engine/adapter-service.js";
+import { computeRealizedPnlUsd } from "../engine/pnl.js";
 import {
   RENT_BASIS_EPOCH_MS,
   applyRentBackfill,
@@ -25,6 +27,7 @@ function row(overrides: Partial<AuditRow> = {}): AuditRow {
     modeledCostsUsd: 0,
     feesUsd: 0,
     rewardsUsd: 0,
+    sweepFeeUsd: 0,
     ...overrides,
   };
 }
@@ -106,7 +109,7 @@ describe("persistence", () => {
       );
       CREATE TABLE position_events (
         id TEXT PRIMARY KEY, pool_address TEXT, position_id TEXT, event TEXT,
-        value_usd REAL, metadata TEXT, created_at INTEGER
+        value_usd REAL, fees_usd REAL, metadata TEXT, created_at INTEGER
       );
     `);
     return db;
@@ -116,7 +119,7 @@ describe("persistence", () => {
     const db = makeDb();
     db.exec(`
       INSERT INTO positions VALUES ('p1', ${AFTER_FIX}, 'pub', 19.88, 3.0, 3.0, 0.0, 0.0);
-      INSERT INTO position_events VALUES ('e1', 'pool', 'p1', 'EXIT', 22.88, '{"modeledCostsUsd":0}', 1);
+      INSERT INTO position_events VALUES ('e1', 'pool', 'p1', 'EXIT', 22.88, NULL, '{"modeledCostsUsd":0}', 1);
     `);
     const rows = readClosedPositions(db);
     expect(rows).toHaveLength(1);
@@ -129,7 +132,7 @@ describe("persistence", () => {
     const db = makeDb();
     db.exec(`
       INSERT INTO positions VALUES ('p1', ${AFTER_FIX}, 'pub', 19.88, 3.0, NULL, 0.0, 0.0);
-      INSERT INTO position_events VALUES ('e1', 'pool', 'p1', 'EXIT', 22.88, '{"modeledCostsUsd":0}', 1);
+      INSERT INTO position_events VALUES ('e1', 'pool', 'p1', 'EXIT', 22.88, NULL, '{"modeledCostsUsd":0}', 1);
     `);
     const audit = auditRows(readClosedPositions(db));
     expect(applyRentBackfill(db, audit.rentBackfill)).toBe(1);
@@ -143,6 +146,76 @@ describe("persistence", () => {
     expect(meta.metadata).toContain("rentUnaccounted");
     // Second run plans nothing.
     expect(auditRows(readClosedPositions(db)).rentBackfill).toHaveLength(0);
+    db.close();
+  });
+});
+
+describe("writer -> auditor round trip (end to end)", () => {
+  function makeDb(): Database {
+    const db = new Database(":memory:");
+    db.exec(`
+      CREATE TABLE positions (
+        position_id TEXT PRIMARY KEY, closed_at INTEGER, position_pubkey TEXT,
+        deposited_usd REAL, realized_pnl_usd REAL, entry_overhead_usd REAL,
+        cumulative_fees_claimed_usd REAL, cumulative_rewards_claimed_usd REAL
+      );
+      CREATE TABLE position_events (
+        id TEXT PRIMARY KEY, pool_address TEXT, position_id TEXT, event TEXT,
+        value_usd REAL, fees_usd REAL, metadata TEXT, created_at INTEGER
+      );
+    `);
+    return db;
+  }
+
+  it("writes a flat close with the real writers, then audits it clean", () => {
+    const db = makeDb();
+    const deposit = 19.88;
+    const overhead = 3.0; // rent + wrap + entry fee, measured at entry
+    const gross = deposit + overhead; // what the wallet got back: deposit + rent
+    const sweptFee = 0.25; // claimed by shouldClaimAndClose, credited AFTER realized
+
+    // The writer path, exactly as the engine runs it.
+    const withdrawnUsd = netWithdrawnUsd(gross, overhead);
+    expect(withdrawnUsd).toBeCloseTo(deposit, 9);
+    const realized = computeRealizedPnlUsd(withdrawnUsd ?? Number.NaN, 0, deposit, 0);
+    expect(realized).toBeCloseTo(0, 9);
+
+    db.exec(`
+      INSERT INTO positions VALUES (
+        'p1', ${AFTER_FIX}, 'LivePubkey111', ${deposit}, ${realized}, ${overhead},
+        ${sweptFee}, 0.0
+      );
+      INSERT INTO position_events VALUES (
+        'exit', 'pool', 'p1', 'EXIT', ${withdrawnUsd}, ${sweptFee},
+        '{"modeledCostsUsd":0}', 1
+      );
+      INSERT INTO position_events VALUES (
+        'sweep', 'pool', 'p1', 'CLAIM', NULL, ${sweptFee},
+        '{"kind":"exit_sweep"}', 2
+      );
+    `);
+
+    const audit = auditRows(readClosedPositions(db));
+    expect(audit.findings[0]?.status).toBe("ok");
+    expect(audit.counts.ok).toBe(1);
+    // The sweep is inside the withdrawal and also in the lifetime fee total;
+    // the auditor must not add it twice.
+    expect(audit.adjustedUsd).toBeCloseTo(0, 9);
+    expect(audit.reportedUsd).toBeCloseTo(0, 9);
+    db.close();
+  });
+
+  it("reports the pre-fix shape as rent-unaccounted rather than profit", () => {
+    const db = makeDb();
+    // No overhead recorded, withdrawal gross of rent: the exact 2026-11 row.
+    db.exec(`
+      INSERT INTO positions VALUES ('p2', ${AFTER_FIX}, 'LivePubkey222', 19.88, 3.0, NULL, 0.0, 0.0);
+      INSERT INTO position_events VALUES ('e2', 'pool', 'p2', 'EXIT', 22.88, NULL, '{}', 1);
+    `);
+    const audit = auditRows(readClosedPositions(db));
+    expect(audit.findings[0]?.status).toBe("rent-unaccounted");
+    expect(audit.rentBackfill).toEqual(["p2"]);
+    expect(audit.adjustedUsd).toBeCloseTo(0, 9);
     db.close();
   });
 });

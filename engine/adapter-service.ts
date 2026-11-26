@@ -1837,6 +1837,8 @@ interface EntryOverheadInput {
   readonly decimalsY: number;
   readonly priceX: number | undefined;
   readonly priceY: number | undefined;
+  /** SOL/USD, always required when either leg is SOL (rent is charged in SOL). */
+  readonly solPriceUsd?: number | undefined;
   /** Actually deposited amounts (confirmed position), not the request. */
   readonly depositXAtomic: string;
   readonly depositYAtomic: string;
@@ -1891,6 +1893,17 @@ function legSpendUnits(
     : splSpendUnits(input, mint, decimals, depositAtomic);
 }
 
+/** USD price for one leg: the SOL leg always uses the resolved SOL price. */
+function legPrice(input: EntryOverheadInput, mint: string): number | null {
+  const direct = mint === input.tokenXMint ? input.priceX : input.priceY;
+  if (mint === SOL_MINT) {
+    // Never fall back to the OTHER leg's price: a SOL leg priced with a token's
+    // price would multiply rent by the wrong asset.
+    return usablePrice(input.solPriceUsd) ?? usablePrice(direct);
+  }
+  return usablePrice(direct);
+}
+
 /** The deposit's own USD value at the entry prices. */
 function entryDepositUsd(input: EntryOverheadInput, priceX: number, priceY: number): number {
   const xUsd = Number(atomicToUnits(BigInt(input.depositXAtomic || "0"), input.decimalsX)) * priceX;
@@ -1904,22 +1917,38 @@ function entryDepositUsd(input: EntryOverheadInput, priceX: number, priceY: numb
  * delta the exit uses, so the two sides of realized PnL are symmetric and
  * refunded rent can never be booked as trading profit.
  *
- * Returns null when unmeasurable (missing snapshot, missing price, non-finite
- * arithmetic) — the caller records "unknown" rather than a fabricated 0.
- * Clamped at 0: an entry that somehow costs less than the deposit reports no
- * overhead (it never reports a credit).
+ * A leg with no measurable spend (the unused side of a forced single-sided
+ * entry) does NOT need a price: requiring one was how the forced-X lane lost
+ * its overhead entirely and kept booking rent as profit. The SOL leg always
+ * prices from `solPriceUsd` — rent is charged in SOL even when SOL is not
+ * deposited.
+ *
+ * Returns null when unmeasurable (missing snapshot, a used leg with no price,
+ * non-finite arithmetic) — the caller records "unknown" rather than a
+ * fabricated 0. Clamped at 0: an entry that costs less than the deposit reports
+ * no overhead (it never reports a credit).
  */
 export function computeEntryOverheadUsd(input: EntryOverheadInput): number | null {
-  const priceX = usablePrice(input.priceX);
-  const priceY = usablePrice(input.priceY);
-  if (priceX === null || priceY === null) return null;
   const spentX = legSpendUnits(input, input.tokenXMint, input.decimalsX, input.depositXAtomic);
   const spentY = legSpendUnits(input, input.tokenYMint, input.decimalsY, input.depositYAtomic);
-  if (spentX === null || spentY === null) return null;
-  const spentUsd = spentX * priceX + spentY * priceY;
-  const depositUsd = entryDepositUsd(input, priceX, priceY);
+  const usdX = legUsd(spentX, legPrice(input, input.tokenXMint));
+  const usdY = legUsd(spentY, legPrice(input, input.tokenYMint));
+  if (usdX === null || usdY === null) return null;
+  const spentUsd = usdX + usdY;
+  const depositUsd = entryDepositUsd(
+    input,
+    legPrice(input, input.tokenXMint) ?? 0,
+    legPrice(input, input.tokenYMint) ?? 0,
+  );
   if (!Number.isFinite(spentUsd) || !Number.isFinite(depositUsd)) return null;
   return Math.max(0, spentUsd - depositUsd);
+}
+
+/** USD for one leg, or null when it spent something it cannot price. */
+function legUsd(units: number | null, price: number | null): number | null {
+  if (units === null) return null;
+  if (units === 0) return 0;
+  return price === null ? null : units * price;
 }
 
 /**
@@ -4055,6 +4084,15 @@ export const makeAdapterLive = (
       }) {
         return Effect.gen(function* () {
           const after = yield* readPostCloseSnapshot();
+          // Rent is charged in SOL even on a forced single-sided entry whose
+          // SOL leg carries price 0, so resolve SOL/USD whenever a leg is SOL.
+          const needsSolPrice = input.tokenXMint === SOL_MINT || input.tokenYMint === SOL_MINT;
+          const solPriceUsd = needsSolPrice
+            ? yield* fetchTokenPrices([SOL_MINT]).pipe(
+                Effect.map((prices) => prices[SOL_MINT] ?? 0),
+                Effect.catch(() => Effect.succeed(0)),
+              )
+            : 0;
           const overhead = computeEntryOverheadUsd({
             beforeHeld: input.before.held,
             afterHeld: after.held,
@@ -4066,6 +4104,7 @@ export const makeAdapterLive = (
             decimalsY: input.decimalsY,
             priceX: input.priceX,
             priceY: input.priceY,
+            solPriceUsd,
             depositXAtomic: input.depositXAtomic,
             depositYAtomic: input.depositYAtomic,
           });

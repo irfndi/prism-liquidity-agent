@@ -70,6 +70,7 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
           depositMode: "two-sided" as const,
           amountXUsd: positionSizeUsd / 2,
           amountYUsd: positionSizeUsd / 2,
+          entryOverheadUsd: 0,
         }),
       exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
       rebalancePosition: () =>

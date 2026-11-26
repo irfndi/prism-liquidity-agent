@@ -52,7 +52,9 @@ function printReport(
   line("rent-unaccounted", String(audit.counts["rent-unaccounted"]));
   line("reported PnL", money(audit.reportedUsd));
   line("trusted-only PnL", money(audit.adjustedUsd));
-  line("voided (rent rows)", money(audit.reportedUsd - audit.adjustedUsd));
+  // Everything the report flagged: unpriced, drift and rent-unaccounted. The
+  // trusted total above contains ONLY rows that re-derived and had provenance.
+  line("excluded (n/a+drift+rent)", money(audit.reportedUsd - audit.adjustedUsd));
   if (audit.rentBackfill.length > 0) {
     line(
       "rent backfill",

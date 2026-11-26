@@ -87,6 +87,7 @@ function makeAdapter(pools: Record<string, ReturnType<typeof makePool>>): Adapte
         depositMode: "two-sided" as const,
         amountXUsd: positionSizeUsd / 2,
         amountYUsd: positionSizeUsd / 2,
+        entryOverheadUsd: 0,
       }),
     exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
     rebalancePosition: () =>

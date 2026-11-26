@@ -1246,6 +1246,7 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
         depositMode: "two-sided" as const,
         amountXUsd: positionSizeUsd / 2,
         amountYUsd: positionSizeUsd / 2,
+        entryOverheadUsd: 0,
       }),
     exitPosition: () => Effect.succeed({ txSignature: "tx-exit" }),
     // Atomic rebalance (Wave 6): the SDK rebalancePosition instruction

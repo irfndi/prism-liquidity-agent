@@ -68,10 +68,35 @@ describe("computeEntryOverheadUsd", () => {
     expect(computeEntryOverheadUsd({ ...input, afterNativeSol: null })).toBeNull();
   });
 
-  it("returns null when a price is unusable", () => {
+  it("is unmeasurable only when a leg that SPENT something has no price", () => {
     const input = solLegCase(274_889_220n, 317_089_220n);
-    expect(computeEntryOverheadUsd({ ...input, priceY: undefined })).toBeNull();
-    expect(computeEntryOverheadUsd({ ...input, priceX: 0 })).toBeNull();
+    // The SOL leg spent the money; without a price for it the gap is unknown.
+    expect(computeEntryOverheadUsd({ ...input, priceY: undefined, solPriceUsd: 0 })).toBeNull();
+    // The X leg spent nothing, so its missing price cannot poison the result —
+    // this is the forced-single-sided shape that used to lose its overhead.
+    expect(computeEntryOverheadUsd({ ...input, priceX: 0 })).toBeCloseTo(0.0422 * SOL_PRICE, 6);
+  });
+
+  it("measures the rent of a forced single-sided entry whose SOL leg carries price 0", () => {
+    // fetchEntryPrices sets priceY = 0 on forceSingleSidedX (only tokenX is
+    // priced). Rent is still paid in SOL, so it must come from solPriceUsd.
+    const depositXAtomic = 40_000_000n; // 40.0 token X at $0.50
+    const input = {
+      beforeHeld: heldOf([[MEME, 40_000_000n, 6]]),
+      afterHeld: heldOf([[MEME, 0n, 6]]),
+      beforeNativeSol: 400_000_000n,
+      afterNativeSol: 358_000_000n, // 0.042 SOL of rent + fee
+      tokenXMint: MEME,
+      tokenYMint: SOL_MINT,
+      decimalsX: 6,
+      decimalsY: 9,
+      priceX: 0.5,
+      priceY: 0,
+      solPriceUsd: SOL_PRICE,
+      depositXAtomic: depositXAtomic.toString(),
+      depositYAtomic: "0",
+    };
+    expect(computeEntryOverheadUsd(input)).toBeCloseTo(0.042 * SOL_PRICE, 6);
   });
 
   it("ignores a leg the wallet GAINED instead of charging it as spend", () => {
