@@ -2,7 +2,7 @@
  * Hard age backstop (field-research-driven): EXIT once a position has been
  * open longer than maxAgeMs, regardless of measured-fee status. Every other
  * economic exit (fee/IL, yield-regression) skips when the pool's fee data is
- * unmeasured (gecko/heuristic statsSource) — this is the only gate that
+ * unmeasured (secondary-modeled/heuristic statsSource) — this is the only gate that
  * still fires then, so a position with no measured signal can't drift
  * indefinitely. Launch-mode positions are exempt: their own timebox
  * lifecycle already bounds their age far tighter than this backstop.

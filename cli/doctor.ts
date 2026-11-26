@@ -14,6 +14,9 @@ import { probeVecAvailability, vecRemediationHint, type VecProbeResult } from ".
 import {
   normalizeHeliusUrl,
   maskHeliusUrl,
+  parseRpcPoolUrls,
+  resolveRpcFallbackUrl,
+  isSolanaLabsPublicRpcUrl,
   ConfigService,
   ConfigLive,
 } from "../engine/config-service.js";
@@ -21,6 +24,10 @@ import { findDbConfigSpec, parseDbConfigValue } from "../engine/db-config.js";
 import { loadKeystoreSecretKeyBase58 } from "../engine/wallet-keystore.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
 import { readTelemetryPreference } from "../engine/telemetry-preference.js";
+import { SOL_MINT } from "../engine/constants.js";
+import { parseDefillamaCoinData } from "../engine/defillama-service.js";
+import { parseDexscreenerTokenPrices } from "../engine/dexscreener-service.js";
+import type { JsonValue } from "../engine/services.js";
 import { Effect } from "effect";
 
 type DoctorStatus = "pass" | "warn" | "fail";
@@ -138,42 +145,52 @@ function checkRuntime(): DoctorCheck {
     : check("runtime", "fail", `Bun ${Bun.version} is below 1.4.0`);
 }
 
+function effectiveRpcPool(primary: string, fallback: string, helius: string): string[] {
+  const normalizedPrimary = normalizeHeliusUrl(primary, helius).url;
+  const normalizedFallback = fallback
+    .split(",")
+    .map((url) => normalizeHeliusUrl(url, helius).url)
+    .join(",");
+  return parseRpcPoolUrls(normalizedPrimary, normalizedFallback);
+}
+
 function checkRpcPair(
   primary: string,
   fallback: string,
   helius: string,
   paperTrading: boolean,
 ): DoctorCheck {
-  if (
-    fallback &&
-    normalizeHeliusUrl(fallback, helius).url === normalizeHeliusUrl(primary, helius).url
-  ) {
-    return check("rpc", "fail", "SOLANA_RPC_FALLBACK_URL duplicates SOLANA_RPC_URL");
+  const pool = effectiveRpcPool(primary, fallback, helius);
+  if (pool.length < 2) {
+    return check(
+      "rpc",
+      paperTrading ? "warn" : "fail",
+      paperTrading
+        ? "Only one independent RPC provider configured"
+        : "Live trading requires an independent fallback RPC provider",
+    );
   }
-  if (!fallback && !paperTrading) {
-    return check("rpc", "warn", "No fallback RPC configured for live trading");
-  }
-  return check(
-    "rpc",
-    "pass",
-    fallback ? "Primary and fallback RPC providers configured" : "Primary RPC configured",
-  );
+  return check("rpc", "pass", `${pool.length} independent RPC providers configured`);
 }
 
 function checkRpc(): DoctorCheck {
   const { primary, helius, fallback } = readRpcEnv();
   const paperTrading = isPaperTrading();
-  if (!primary && !helius) {
+  const effectivePrimary =
+    primary || (helius ? `https://mainnet.helius-rpc.com/?api-key=${helius}` : "");
+  if (!effectivePrimary) {
     return check("rpc", "fail", "No SOLANA_RPC_URL or HELIUS_API_KEY configured");
   }
-  if (primary === "https://api.mainnet-beta.solana.com") {
+  const normalizedPrimary = normalizeHeliusUrl(effectivePrimary, helius).url;
+  if (isSolanaLabsPublicRpcUrl(normalizedPrimary)) {
     return check(
       "rpc",
       paperTrading ? "warn" : "fail",
       "Public Solana RPC is configured; use a paid/private provider for live trading",
     );
   }
-  return checkRpcPair(primary, fallback, helius, paperTrading);
+  const effectiveFallback = resolveRpcFallbackUrl(fallback, normalizedPrimary, false);
+  return checkRpcPair(normalizedPrimary, effectiveFallback, helius, paperTrading);
 }
 
 async function readHealthPayload(
@@ -235,16 +252,40 @@ async function probeRpcEndpoint(
   }
 }
 
-async function checkFallbackConnectivity(fallback: string, helius: string): Promise<DoctorCheck> {
-  const fallbackResult = await probeRpcEndpoint(normalizeHeliusUrl(fallback, helius).url);
-  if (!fallbackResult.ok) {
+async function checkFallbackConnectivity(
+  primary: string,
+  fallback: string,
+  helius: string,
+): Promise<DoctorCheck> {
+  const pool = effectiveRpcPool(primary, fallback, helius);
+  const fallbacks = pool.slice(1);
+  if (fallbacks.length === 0) {
+    return check("rpc-connectivity", "pass", "Primary RPC endpoint reachable");
+  }
+  const results = await Promise.all(
+    fallbacks.map(async (url) => ({ url, result: await probeRpcEndpoint(url) })),
+  );
+  const failed = results.filter(({ result }) => !result.ok);
+  if (failed.length > 0) {
+    const detail = failed
+      .map(({ url, result }) => {
+        const host = (() => {
+          try {
+            return new URL(url).hostname;
+          } catch {
+            return "invalid-url";
+          }
+        })();
+        return `${host}: ${result.error}`;
+      })
+      .join("; ");
     return check(
       "rpc-connectivity",
       "warn",
-      `Primary RPC reachable but fallback failed: ${fallbackResult.error}`,
+      `Primary RPC reachable but fallback failed: ${detail}`,
     );
   }
-  return check("rpc-connectivity", "pass", "Primary and fallback RPC endpoints reachable");
+  return check("rpc-connectivity", "pass", `${pool.length} RPC endpoints reachable`);
 }
 
 async function checkRpcConnectivity(): Promise<DoctorCheck> {
@@ -257,13 +298,14 @@ async function checkRpcConnectivity(): Promise<DoctorCheck> {
     return check("rpc-connectivity", "warn", "No RPC endpoint configured; skipping live probe");
   }
 
-  const primaryResult = await probeRpcEndpoint(normalizeHeliusUrl(effectivePrimary, helius).url);
+  const normalizedPrimary = normalizeHeliusUrl(effectivePrimary, helius).url;
+  const primaryResult = await probeRpcEndpoint(normalizedPrimary);
   if (!primaryResult.ok) {
     return check("rpc-connectivity", "fail", `Primary RPC unreachable: ${primaryResult.error}`);
   }
 
-  if (fallback) return checkFallbackConnectivity(fallback, helius);
-  return check("rpc-connectivity", "pass", "Primary RPC endpoint reachable");
+  const effectiveFallback = resolveRpcFallbackUrl(fallback, normalizedPrimary, false);
+  return checkFallbackConnectivity(normalizedPrimary, effectiveFallback, helius);
 }
 
 async function checkHeliusApiKey(): Promise<DoctorCheck> {
@@ -336,6 +378,59 @@ function checkPriceProviders(): DoctorCheck {
       ? `Price chain active with ${configured} optional provider key${configured === 1 ? "" : "s"}`
       : "Price chain active with public provider fallbacks",
   );
+}
+
+async function probePublicDataProvider(provider: {
+  readonly name: string;
+  readonly url: string;
+  readonly parse: (body: JsonValue) => boolean;
+}): Promise<{ readonly name: string; readonly ok: boolean; readonly status: number }> {
+  try {
+    const response = await fetch(provider.url, {
+      signal: AbortSignal.timeout(8_000),
+      redirect: "error",
+    });
+    if (!response.ok) return { name: provider.name, ok: false, status: response.status };
+    // SAFETY: The provider-specific parser validates this external JSON before domain use.
+    const body = (await response.json()) as JsonValue;
+    return { name: provider.name, ok: provider.parse(body), status: response.status };
+  } catch {
+    return { name: provider.name, ok: false, status: 0 };
+  }
+}
+
+async function checkPublicDataProviders(): Promise<DoctorCheck> {
+  const probes: Array<() => ReturnType<typeof probePublicDataProvider>> = [];
+  if (process.env.DEFILLAMA_ENABLED?.trim().toLowerCase() !== "false") {
+    probes.push(() =>
+      probePublicDataProvider({
+        name: "DefiLlama",
+        url: `https://coins.llama.fi/prices/current/solana:${SOL_MINT}`,
+        parse: (body) => parseDefillamaCoinData(body, [SOL_MINT]).size > 0,
+      }),
+    );
+  }
+  if (process.env.DEXSCREENER_ENABLED?.trim().toLowerCase() !== "false") {
+    probes.push(() =>
+      probePublicDataProvider({
+        name: "DexScreener",
+        url: `https://api.dexscreener.com/tokens/v1/solana/${SOL_MINT}`,
+        parse: (body) => parseDexscreenerTokenPrices(body, [SOL_MINT]).size > 0,
+      }),
+    );
+  }
+  if (probes.length === 0)
+    return check("public-data", "warn", "Secondary public data providers disabled");
+  const results = await Promise.all(probes.map((probe) => probe()));
+  const failed = results.filter((result) => !result.ok);
+  if (failed.length > 0) {
+    return check(
+      "public-data",
+      "warn",
+      `Public data provider check failed: ${failed.map((result) => `${result.name} (${result.status || "network"})`).join(", ")}`,
+    );
+  }
+  return check("public-data", "pass", `${results.length} keyless public data providers reachable`);
 }
 
 function resolveMarketScanFlag(
@@ -443,6 +538,7 @@ async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   ]);
   checks.push(rpcConnectivity, heliusApiKey);
   checks.push(checkPriceProviders());
+  checks.push(await checkPublicDataProviders());
   checks.push(checkWallet());
   checks.push(await checkConfig());
   checks.push(await checkRegistration());

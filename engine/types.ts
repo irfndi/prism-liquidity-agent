@@ -136,13 +136,15 @@ export interface PoolState {
   timestamp: number;
   /**
    * Where tvl/volume/fees came from, in resolution order:
-   * "datapi" > "geckoterminal" > "heuristic". "datapi" = real Meteora Data API
-   * values (and the only source of safety signals — blacklist/freeze/verified/
-   * farm); "geckoterminal" = real GeckoTerminal 24h volume + reserve TVL with
-   * fees derived from real volume × the pool's base-fee rate; "heuristic" =
-   * on-chain reserves × price with modeled turnover (FABRICATED volume/fees,
-   * last-resort safety net only). Volume-authenticity and the fee/IL ratio are
-   * only meaningful for non-heuristic stats; gates skip them when heuristic.
+   * "datapi" > "geckoterminal" > "heuristic". The "geckoterminal" tag covers
+   * both measured secondary providers (DexScreener first, GeckoTerminal
+   * fallback); "datapi" = real Meteora Data API values (and the only source of
+   * safety signals — blacklist/freeze/verified/farm); "geckoterminal" = real
+   * 24h volume + reserve TVL with fees derived from real volume × the pool's
+   * base-fee rate; "heuristic" = on-chain reserves × price with modeled
+   * turnover (FABRICATED volume/fees, last-resort safety net only).
+   * Volume-authenticity and the fee/IL ratio are only meaningful for
+   * non-heuristic stats; gates skip them when heuristic.
    */
   statsSource?: "datapi" | "geckoterminal" | "heuristic" | undefined;
   /**
@@ -158,14 +160,10 @@ export interface PoolState {
 }
 
 /**
- * Whether a pool's tvl/volume/fees came from a MEASURED source. Only datapi and
- * geckoterminal carry real volume/fees; "heuristic" is fabricated and undefined
- * (a fixture/legacy pool that was never enriched) is treated the same — unknown.
- * Fail-closed: the volume/fee gates and the paper-accrual gate act ONLY on a
- * measured source, so fabricated values can never silently pass a gate. In
- * production the adapter always tags raw pools "heuristic", so this is exactly
- * equivalent to `statsSource !== "heuristic"` over {datapi, geckoterminal,
- * heuristic} — the positive form additionally fails closed on undefined.
+ * Whether a pool's TVL/volume came from a MEASURED source. Datapi and the
+ * secondary-source tag (DexScreener/GeckoTerminal) carry real volume/TVL;
+ * "heuristic" is fabricated and undefined is unknown. Fee measurement is a
+ * separate datapi-only contract — secondary fees remain modeled.
  */
 export function isMeasuredStatsSource(
   source: PoolState["statsSource"],

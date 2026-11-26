@@ -13,6 +13,7 @@ import {
   type GeckoPoolStats,
   setGeckoRequestIntervalMsForTest,
 } from "../engine/gecko-terminal-service.js";
+import type { DexscreenerPoolStats } from "../engine/dexscreener-service.js";
 import {
   AdapterService,
   BlacklistService,
@@ -38,7 +39,7 @@ import {
 import type { PoolMetrics } from "../engine/types.js";
 import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 
-// ─── Stats source pipeline: datapi > geckoterminal > heuristic ──────────────
+// ─── Stats source pipeline: datapi > dexscreener > geckoterminal > heuristic ──
 // Fabricated (heuristic) stats must never pass a volume/fee gate. This file
 // drives the FULL scan loop with both stats sources injected as service stubs
 // so each tier's propagation (statsSource + known flags + gate behaviour) is
@@ -125,6 +126,7 @@ function makeTestLayer(opts: {
   adapter: AdapterApi;
   datapi?: MeteoraDatapiApi;
   gecko?: GeckoPoolStats | null;
+  dex?: DexscreenerPoolStats | null;
   configOverrides?: Partial<AppConfig>;
   alertCapture?: EngineAlert[];
 }) {
@@ -196,7 +198,7 @@ function makeTestLayer(opts: {
       getPoolStats: () => Effect.succeed(opts.gecko ?? null),
     }),
     Layer.succeed(DexScreenerService, {
-      getPoolStats: () => Effect.succeed(null),
+      getPoolStats: () => Effect.succeed(opts.dex ?? null),
     }),
     Layer.succeed(AlertService, {
       sendAlert: capture
@@ -303,6 +305,30 @@ afterEach(() => {
 });
 
 describe("stats source propagation — datapi vs gecko vs heuristic", () => {
+  it("prefers the higher-quota DexScreener source when both secondaries are available", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) },
+      dex: {
+        tvlUsd: 123_456,
+        volume24hUsd: 456_789,
+        fees24hUsd: 1_600,
+        basePriceUsd: 150,
+        quotePriceUsd: 1,
+      },
+      gecko: geckoStats(100, 100_000),
+      configOverrides: {
+        watchlistPools: [POOL],
+        geckoTerminalEnabled: true,
+        dexscreenerEnabled: true,
+      },
+    });
+    const rows = poolRows(await runWithSeed(layer, []));
+    const metrics = rows.find((row) => row.metrics !== undefined)?.metrics;
+    expect(metrics?.pool.tvlUsd).toBe(123_456);
+    expect(metrics?.pool.volume24hUsd).toBe(456_789);
+  }, 15_000);
+
   it("datapi down + gecko up → enriches geckoterminal: volume/TVL known, fees NOT known (modeled) so [fee-il-gate] SKIPS", async () => {
     // gecko volume 100 × 0.0035 = fees ≈ 0.35 on tvl 100_000 → a low fee/IL
     // ratio (< 1.2). Gecko volume + TVL are REAL (volumeAuthenticityKnown=true),

@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import {
   parseDexscreenerPoolStats,
+  parseDexscreenerTokenPrices,
+  getDexscreenerTokenPrices,
   getDexscreenerPoolStats,
+  clearDexscreenerCacheForTest,
   setDexscreenerRequestIntervalMsForTest,
   type FetchLike,
 } from "../engine/dexscreener-service.js";
@@ -22,6 +25,7 @@ const LIVE_RESPONSE = {
       baseToken: { address: "XSTuo1fV7HHMhs4BYiwtrWSLsMCJNrooH2AssWTYZqP", symbol: "XST" },
       quoteToken: { address: "So11111111111111111111111111111111111111112", symbol: "SOL" },
       priceUsd: "0.05429",
+      priceNative: "0.00036",
       volume: { h24: 4204820.6, h6: 1587627.93 },
       liquidity: { usd: 52747.44, base: 42261, quote: 665.6066 },
     },
@@ -102,11 +106,12 @@ describe("parseDexscreenerPoolStats", () => {
 
 describe("getDexscreenerPoolStats", () => {
   beforeEach(() => {
+    clearDexscreenerCacheForTest();
     setDexscreenerRequestIntervalMsForTest(0);
   });
 
   afterEach(() => {
-    setDexscreenerRequestIntervalMsForTest(120);
+    setDexscreenerRequestIntervalMsForTest(250);
     vi.restoreAllMocks();
   });
 
@@ -136,6 +141,21 @@ describe("getDexscreenerPoolStats", () => {
     expect(stats).toBeNull();
   });
 
+  it("skips network traffic while the provider breaker is open", async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response("{}", { status: 429 })));
+    for (let index = 0; index < 3; index += 1) {
+      await getDexscreenerPoolStats(`RateLimited${index}`, {
+        baseFeeRate: BASE_FEE_RATE,
+        fetchImpl,
+      });
+    }
+    await getDexscreenerPoolStats("RateLimitedAfterOpen", {
+      baseFeeRate: BASE_FEE_RATE,
+      fetchImpl,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
   it("returns null on timeout / network rejection (fail-through, no throw)", async () => {
     const stats = await getDexscreenerPoolStats("SomePool", {
       baseFeeRate: BASE_FEE_RATE,
@@ -153,6 +173,29 @@ describe("getDexscreenerPoolStats", () => {
     expect(stats).toBeNull();
   });
 
+  it("coalesces concurrent identical pool lookups into one request", async () => {
+    const fetchImpl = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return new Response(JSON.stringify(LIVE_RESPONSE), { status: 200 });
+    });
+    const [first, second] = await Promise.all([
+      getDexscreenerPoolStats("ConcurrentPool", { baseFeeRate: BASE_FEE_RATE, fetchImpl }),
+      getDexscreenerPoolStats("ConcurrentPool", { baseFeeRate: BASE_FEE_RATE, fetchImpl }),
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(first?.tvlUsd).toBe(52_747.44);
+    expect(second?.tvlUsd).toBe(52_747.44);
+  });
+
+  it("serves a repeated pool lookup from the 30s normalized cache", async () => {
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify(LIVE_RESPONSE), { status: 200 })),
+    );
+    await getDexscreenerPoolStats("CachedPool", { baseFeeRate: BASE_FEE_RATE, fetchImpl });
+    await getDexscreenerPoolStats("CachedPool", { baseFeeRate: BASE_FEE_RATE, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("honors a baseUrl override for the constructed pool path", async () => {
     const fetchImpl = vi.fn(() =>
       Promise.resolve(new Response(JSON.stringify(LIVE_RESPONSE), { status: 200 })),
@@ -166,6 +209,51 @@ describe("getDexscreenerPoolStats", () => {
       "https://dexscreener.example.test/latest/dex/pairs/solana/PoolXYZ",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+});
+
+describe("DexScreener batch token prices", () => {
+  it("prices base mints directly and quote mints from USD/native, choosing the deepest pair", () => {
+    const base = "BaseMint111111111111111111111111111111111";
+    const quote = "QuoteMint11111111111111111111111111111111";
+    const prices = parseDexscreenerTokenPrices(
+      [
+        {
+          baseToken: { address: base },
+          quoteToken: { address: quote },
+          priceUsd: "2",
+          priceNative: "4",
+          liquidity: { usd: 100 },
+        },
+        {
+          baseToken: { address: base },
+          quoteToken: { address: quote },
+          priceUsd: "3",
+          priceNative: "6",
+          liquidity: { usd: 500 },
+        },
+      ],
+      [base, quote],
+    );
+    expect(prices.get(base)).toBe(3);
+    expect(prices.get(quote)).toBeCloseTo(0.5);
+  });
+
+  it("returns an empty record for a non-array payload", () => {
+    expect(parseDexscreenerTokenPrices({ pairs: null }, ["mint"]).size).toBe(0);
+  });
+
+  it("batches up to 30 mints into one request", async () => {
+    setDexscreenerRequestIntervalMsForTest(0);
+    const mints = Array.from({ length: 31 }, (_, index) => `Mint${index}`);
+    const urls: string[] = [];
+    const fetchImpl = vi.fn((input: string | URL | Request) => {
+      urls.push(input instanceof Request ? input.url : input instanceof URL ? input.href : input);
+      return Promise.resolve(new Response("[]", { status: 200 }));
+    });
+    await getDexscreenerTokenPrices(mints, { fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(urls[0]).toContain(mints.slice(0, 30).join(","));
   });
 });
 
@@ -186,7 +274,7 @@ describe("getDexscreenerPoolStats request pacing", () => {
         "the second request must wait out the paced interval",
       ).toBeGreaterThanOrEqual(70);
     } finally {
-      setDexscreenerRequestIntervalMsForTest(120);
+      setDexscreenerRequestIntervalMsForTest(250);
     }
   });
 });

@@ -5,8 +5,10 @@ import {
   ConfigLive,
   capAdvisoryTimeoutMs,
   resolveRpcFallbackUrl,
+  parseRpcPoolUrls,
   PUBLIC_SOLANA_RPC_URL,
-  KEYLESS_FALLBACK_RPC_URL,
+  PUBLICNODE_SOLANA_RPC_URL,
+  POCKET_SOLANA_RPC_URL,
 } from "../engine/config-service.js";
 
 async function loadConfig() {
@@ -509,28 +511,50 @@ describe("ConfigService agent runtime timeout", () => {
 });
 
 describe("resolveRpcFallbackUrl (public RPC fallback default)", () => {
-  it("defaults an empty fallback to the public RPC against a non-public primary", () => {
+  it("defaults an empty fallback to independent free providers against a paid primary", () => {
     expect(resolveRpcFallbackUrl("", "https://mainnet.helius-rpc.com/?api-key=k", false)).toBe(
-      PUBLIC_SOLANA_RPC_URL,
+      `${PUBLIC_SOLANA_RPC_URL},${PUBLICNODE_SOLANA_RPC_URL},${POCKET_SOLANA_RPC_URL}`,
     );
   });
 
-  it("routes a keyless public primary to the keyless fallback (no self-fallback)", () => {
-    expect(resolveRpcFallbackUrl("", PUBLIC_SOLANA_RPC_URL, false)).toBe(KEYLESS_FALLBACK_RPC_URL);
+  it("routes a Solana Labs public primary to independent free providers", () => {
+    expect(resolveRpcFallbackUrl("", PUBLIC_SOLANA_RPC_URL, false)).toBe(
+      `${PUBLICNODE_SOLANA_RPC_URL},${POCKET_SOLANA_RPC_URL}`,
+    );
+    expect(resolveRpcFallbackUrl("", "https://api.mainnet.solana.com", false)).toBe(
+      `${PUBLICNODE_SOLANA_RPC_URL},${POCKET_SOLANA_RPC_URL}`,
+    );
+  });
+
+  it("routes a PublicNode primary to Solana Labs plus Pocket Network", () => {
+    expect(resolveRpcFallbackUrl("", PUBLICNODE_SOLANA_RPC_URL, false)).toBe(
+      `${PUBLIC_SOLANA_RPC_URL},${POCKET_SOLANA_RPC_URL}`,
+    );
   });
 
   it("keeps the fallback empty in test mode (tests never touch the network)", () => {
     expect(resolveRpcFallbackUrl("", "https://mainnet.helius-rpc.com/?api-key=k", true)).toBe("");
   });
 
-  it("uses a configured fallback as-is", () => {
+  it("uses a configured fallback list as-is", () => {
     expect(
       resolveRpcFallbackUrl(
-        "https://custom-rpc.example.com",
+        "https://custom-rpc.example.com,https://solana-rpc.publicnode.com",
         "https://mainnet.helius-rpc.com/?api-key=k",
         false,
       ),
-    ).toBe("https://custom-rpc.example.com");
+    ).toBe("https://custom-rpc.example.com,https://solana-rpc.publicnode.com");
+  });
+});
+
+describe("parseRpcPoolUrls", () => {
+  it("trims, dedupes, and never counts the two Solana Labs aliases as separate capacity", () => {
+    expect(
+      parseRpcPoolUrls(
+        ` ${PUBLIC_SOLANA_RPC_URL} `,
+        "https://api.mainnet.solana.com, https://solana-rpc.publicnode.com, https://solana-rpc.publicnode.com",
+      ),
+    ).toEqual([PUBLIC_SOLANA_RPC_URL, PUBLICNODE_SOLANA_RPC_URL]);
   });
 });
 

@@ -141,7 +141,11 @@ Key env vars (set via `prism setup` or `.env`):
 |----------|----------|---------|-------------|
 | `HELIUS_API_KEY` | NO | empty | Helius DAS/RPC API key |
 | `SOLANA_RPC_URL` | YES | Helius or public fallback | Primary Solana RPC URL |
-| `SOLANA_RPC_FALLBACK_URL` | NO | empty | Separate RPC endpoint used after primary rate-limit/network failures |
+| `SOLANA_RPC_FALLBACK_URL` | NO | keyless Solana Labs + PublicNode + Pocket Network | Comma-separated independent RPC providers; health-aware routing, per-provider pacing, immediate failover |
+| `RPC_MIN_INTERVAL_MS` | NO | `250` | Minimum interval per RPC provider; independent providers multiply aggregate capacity |
+| `DEXSCREENER_ENABLED` | NO | `true` | Keyless DexScreener pool stats and batch token prices |
+| `GECKO_TERMINAL_ENABLED` | NO | `true` | Keyless GeckoTerminal fallback pool stats |
+| `DEFILLAMA_ENABLED` | NO | `true` | Keyless DefiLlama batch coin prices and token metadata |
 | `JUPITER_API_KEY` | NO | empty | Jupiter Price API v3 key |
 | `COINGECKO_API_KEY` | NO | empty | CoinGecko Pro API key |
 | `WALLET_PRIVATE_KEY` | NO | empty | Solana wallet (live trading only) |
@@ -152,5 +156,16 @@ Key env vars (set via `prism setup` or `.env`):
 `prism setup`, `prism dev`, `prism feedback`, and `prism issue` require a valid
 registered account. Feedback and issues are stored in the Prism Cloud D1 store;
 local storage is only an outage fallback.
+
+## Free public-data path
+
+Prism is local-first and does not require a paid RPC or data plan:
+
+- **Pool stats:** Meteora Data API → DexScreener → GeckoTerminal → heuristic.
+- **Token prices:** Jupiter → DefiLlama → DexScreener → CoinGecko → Helius (if configured) → CoinGecko spot.
+- **Token metadata:** known majors → DefiLlama → keyless Solana RPC → Helius (if configured).
+- **RPC reads:** independent providers use health-aware earliest-slot routing, per-provider pacing, and immediate failover. The two Solana Labs hostnames share one quota and count as one leg. Pocket Network is a free fair-use leg; if its SPL enumeration is incomplete, wallet valuation fails closed by under-reporting rather than inventing balances.
+
+Public responses are normalized into bounded in-memory TTL caches; identical concurrent reads are coalesced, and provider circuit breakers skip a rate-limited source instead of retrying it in a loop. Raw public responses are not stored. Only useful token metadata is persisted through the existing SQLite metadata cache.
 
 See [`config-service.ts`](../engine/config-service.ts) for the full list.

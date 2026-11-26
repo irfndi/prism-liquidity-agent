@@ -10,11 +10,19 @@ import {
   priceMissTtlForMint,
   MAJOR_PRICE_MISS_CACHE_TTL_MS,
 } from "../engine/adapter-service.js";
-import { ConfigService } from "../engine/config-service.js";
+import { ConfigService, type AppConfig } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { defaultAppConfig, mockFetch, asOwner } from "./helpers.js";
 import { SOL_MINT, USDC_MINT } from "../engine/constants.js";
+import {
+  clearDefillamaCoinCacheForTest,
+  setDefillamaRequestIntervalMsForTest,
+} from "../engine/defillama-service.js";
+import {
+  clearDexscreenerCacheForTest,
+  setDexscreenerRequestIntervalMsForTest,
+} from "../engine/dexscreener-service.js";
 
 const EXOTIC_MINT = "ExoticToken1111111111111111111111111111111111";
 const TOKEN_2022 = TOKEN_2022_PROGRAM_ID.toBase58();
@@ -75,7 +83,9 @@ async function readWalletBalance(): Promise<number> {
   return Effect.runPromise(program);
 }
 
-function buildAdapterLayerWithWallet(): Layer.Layer<AdapterService, never, never> {
+function buildAdapterLayerWithWallet(
+  overrides: Partial<AppConfig> = {},
+): Layer.Layer<AdapterService, never, never> {
   const walletPrivateKey = bs58.encode(Keypair.generate().secretKey);
   const configLayer = Layer.succeed(
     ConfigService,
@@ -86,6 +96,7 @@ function buildAdapterLayerWithWallet(): Layer.Layer<AdapterService, never, never
       sqliteDbPath: ":memory:",
       autoUpdate: false,
       updateCheckIntervalMs: 216_000_000,
+      ...overrides,
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
@@ -414,19 +425,95 @@ describe("AdapterService wallet holdings seam (getWalletHoldings)", () => {
 describe("AdapterService getTokenPrices fallback behavior", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    clearDefillamaCoinCacheForTest();
+    clearDexscreenerCacheForTest();
+    setDefillamaRequestIntervalMsForTest(1_000);
+    setDexscreenerRequestIntervalMsForTest(250);
   });
 
   async function readTokenPrices(
     mints: readonly string[],
     useFallback: boolean,
+    overrides: Partial<AppConfig> = {},
   ): Promise<Record<string, number>> {
-    const layer = buildAdapterLayerWithWallet();
+    const layer = buildAdapterLayerWithWallet(overrides);
     const program = Effect.gen(function* () {
       const adapter = yield* AdapterService;
       return yield* adapter.getTokenPrices([...mints], { useFallback });
     }).pipe(Effect.provide(layer));
     return Effect.runPromise(program);
   }
+
+  it("uses DefiLlama's keyless batch price API before CoinGecko or Helius", async () => {
+    setDefillamaRequestIntervalMsForTest(0);
+    const timestamp = Math.floor(Date.now() / 1_000);
+    const restore = mockFetch(async (url: string | URL | Request) => {
+      const href = url instanceof Request ? url.url : url instanceof URL ? url.href : url;
+      if (href.includes("api.jup.ag/price/v3") || href.includes("lite-api.jup.ag/price/v3")) {
+        return new Response("{}", { status: 200 });
+      }
+      if (href.includes("coins.llama.fi/prices/current/")) {
+        return new Response(
+          JSON.stringify({
+            coins: {
+              [`solana:${EXOTIC_MINT}`]: {
+                price: 5,
+                confidence: 0.99,
+                timestamp,
+                decimals: 6,
+                symbol: "EXOTIC",
+              },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    try {
+      const prices = await readTokenPrices([EXOTIC_MINT], false, {
+        defillamaEnabled: true,
+        dexscreenerEnabled: true,
+      });
+      expect(prices[EXOTIC_MINT]).toBe(5);
+    } finally {
+      restore();
+    }
+  });
+
+  it("uses DexScreener's batch token-pair prices when higher-tier sources miss", async () => {
+    setDexscreenerRequestIntervalMsForTest(0);
+    const restore = mockFetch(async (url: string | URL | Request) => {
+      const href = url instanceof Request ? url.url : url instanceof URL ? url.href : url;
+      if (href.includes("api.jup.ag/price/v3") || href.includes("lite-api.jup.ag/price/v3")) {
+        return new Response("{}", { status: 200 });
+      }
+      if (href.includes("api.dexscreener.com/tokens/v1/solana/")) {
+        return new Response(
+          JSON.stringify([
+            {
+              baseToken: { address: EXOTIC_MINT },
+              quoteToken: { address: SOL_MINT },
+              priceUsd: "5",
+              priceNative: "0.07",
+              liquidity: { usd: 10_000 },
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    try {
+      const prices = await readTokenPrices([EXOTIC_MINT], false, {
+        defillamaEnabled: false,
+        dexscreenerEnabled: true,
+      });
+      expect(prices[EXOTIC_MINT]).toBe(5);
+    } finally {
+      restore();
+    }
+  });
 
   it("resolves unresolved mints to 0 with useFallback: false instead of fabricated fallback prices", async () => {
     // All price sources fail (mockFetch 500s): fetchTokenPrices never fails —
