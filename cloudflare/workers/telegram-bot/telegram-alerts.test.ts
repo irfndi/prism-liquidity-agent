@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, vi } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
 import worker from "./index";
 
@@ -356,6 +356,161 @@ describe("Telegram alert delivery", () => {
       expect(response.status).toBe(200);
       const sent = sentJson(fetchSpy, 1);
       expect(String(sent.text)).toMatch(/could not update/i);
+    });
+  });
+
+  // Claim lifecycle over the `alerts` state machine: pending = no claim and no
+  // delivered_at, claimed = claim_token + claimed_at, delivered = delivered_at.
+  describe("POST /internal/flush-alerts — claim state machine", () => {
+    function postFlush(): Request {
+      return new Request("https://example.com/internal/flush-alerts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Bot-Api-Secret": BOT_API_SECRET },
+        body: "{}",
+      });
+    }
+
+    async function seedAlert(id: string): Promise<void> {
+      await env.DB.prepare("INSERT INTO users (id, telegram_id) VALUES (?, ?)")
+        .bind("user-claim", "12345")
+        .run()
+        .catch(() => {});
+      await env.DB.prepare(
+        `INSERT INTO alerts (id, user_id, type, severity, message) VALUES (?, ?, ?, ?, ?)`,
+      )
+        .bind(id, "user-claim", "position_out_of_range", "critical", "Claim state alert")
+        .run();
+    }
+
+    async function readRow(id: string) {
+      return await env.DB.prepare(
+        "SELECT claim_token, delivered_at, claimed_at, delivery_attempts FROM alerts WHERE id = ?",
+      )
+        .bind(id)
+        .first<{
+          claim_token: string | null;
+          delivered_at: string | null;
+          claimed_at: number | null;
+          delivery_attempts: number;
+        }>();
+    }
+
+    beforeAll(async () => {
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS users (
+           id TEXT PRIMARY KEY,
+           telegram_id TEXT,
+           tier TEXT NOT NULL DEFAULT 'free',
+           alerts_enabled INTEGER NOT NULL DEFAULT 1,
+           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+         )`,
+      ).run();
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS alerts (
+           id TEXT PRIMARY KEY,
+           user_id TEXT NOT NULL,
+           type TEXT NOT NULL,
+           pool_address TEXT,
+           severity TEXT NOT NULL,
+           message TEXT NOT NULL,
+           data TEXT,
+           delivered_at DATETIME,
+           claim_token TEXT,
+           claimed_at INTEGER,
+           delivery_attempts INTEGER NOT NULL DEFAULT 0,
+           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+         )`,
+      ).run();
+      // A shared D1 may predate migration 0017 from an earlier file run.
+      for (const statement of [
+        "ALTER TABLE alerts ADD COLUMN claim_token TEXT",
+        "ALTER TABLE alerts ADD COLUMN claimed_at INTEGER",
+      ]) {
+        await env.DB.prepare(statement)
+          .run()
+          .catch(() => {});
+      }
+    });
+
+    beforeEach(async () => {
+      vi.restoreAllMocks();
+      await env.DB.prepare("DELETE FROM alerts").run();
+      await env.DB.prepare("DELETE FROM users").run();
+    });
+
+    it("reclaims a stale claim, delivers it, and charges no delivery attempt", async () => {
+      await seedAlert("alert-stale");
+      await env.DB.prepare("UPDATE alerts SET claim_token = ?, claimed_at = ? WHERE id = ?")
+        .bind(crypto.randomUUID(), Date.now() - 10 * 60 * 1000, "alert-stale")
+        .run();
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      const body = (await response.json()) as { checked: number; delivered: number };
+      expect(body).toMatchObject({ checked: 1, delivered: 1 });
+
+      const row = await readRow("alert-stale");
+      expect(row?.delivered_at).not.toBeNull();
+      expect(row?.claim_token).toBeNull();
+      // Bug 2: a claim released by the reclaim sweep is not a failed delivery.
+      expect(row?.delivery_attempts).toBe(0);
+    });
+
+    it("increments delivery_attempts and returns the row to pending on a real failure", async () => {
+      await seedAlert("alert-fail");
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ ok: false }), { status: 400 }),
+      );
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      const body = (await response.json()) as { delivered: number; failed: number };
+      expect(body).toMatchObject({ delivered: 0, failed: 1 });
+
+      const row = await readRow("alert-fail");
+      expect(row?.delivered_at).toBeNull();
+      expect(row?.claim_token).toBeNull();
+      expect(row?.delivery_attempts).toBe(1);
+    });
+
+    it("never delivers the same row from two concurrent flushes", async () => {
+      await seedAlert("alert-race");
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+      const [first, second] = await Promise.all([
+        worker.fetch(postFlush(), testEnv, createExecutionContext()),
+        worker.fetch(postFlush(), testEnv, createExecutionContext()),
+      ]);
+      const bodies = [
+        (await first.json()) as { delivered: number },
+        (await second.json()) as { delivered: number },
+      ];
+
+      expect((bodies[0]?.delivered ?? 0) + (bodies[1]?.delivered ?? 0)).toBe(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const row = await readRow("alert-race");
+      expect(row?.delivered_at).not.toBeNull();
+    });
+
+    it("never re-claims an already delivered row", async () => {
+      await seedAlert("alert-done");
+      await env.DB.prepare("UPDATE alerts SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind("alert-done")
+        .run();
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      expect(await response.json()).toMatchObject({ checked: 0, delivered: 0 });
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const row = await readRow("alert-done");
+      expect(row?.claim_token).toBeNull();
+      expect(row?.delivery_attempts).toBe(0);
     });
   });
 });

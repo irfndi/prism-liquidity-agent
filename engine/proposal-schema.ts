@@ -9,6 +9,20 @@ export class ProposalParseError extends Data.TaggedError("ProposalParseError")<{
 
 const PROPOSAL_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * A proposal is stale once its own TTL passes or its configured staleness
+ * window elapses — whichever comes first. Lives here (not in program.ts) so
+ * the HTTP `/approve` boundary can enforce the same predicate as the decision
+ * loop without importing the engine program (which imports the HTTP server).
+ */
+export function isProposalStale(
+  proposal: Pick<AgentProposal, "proposedAt" | "expiresAt">,
+  staleMs: number,
+  now: number,
+): boolean {
+  return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
+}
+
 const ActionTypeSchema = Schema.Literals(["HOLD", "REBALANCE", "EXIT", "ENTER"]);
 
 const RebalanceParamsSchema = Schema.Struct({

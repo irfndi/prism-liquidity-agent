@@ -4921,6 +4921,34 @@ export const makeAdapterLive = (
             yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
             yield* invalidateBalanceCaches;
 
+            // Post-confirm liquidity assertion: a confirmed entry that deposited
+            // NOTHING creates a phantom position. Live forensics (2026-10-30): all
+            // 11 launch-runner closes reaped empty accounts with $0 withdrawn
+            // against ~$35 booked each — the SDK accepted the tx but the position
+            // held zero principal. One extra read turns that silent no-op into a
+            // failed entry, so the ledger never opens capital that isn't there.
+            // Any read failure fails OPEN (the entry already landed on-chain).
+            const confirmedPosition = yield* Effect.tryPromise(() =>
+              dlmm.getPosition(positionKeypair.publicKey),
+            ).pipe(Effect.catch(() => Effect.succeed(null)));
+            if (
+              confirmedPosition !== null &&
+              confirmedPosition.positionData.totalXAmountExcludeTransferFee.isZero() &&
+              confirmedPosition.positionData.totalYAmountExcludeTransferFee.isZero()
+            ) {
+              yield* reapEmptyPosition(
+                dlmm,
+                confirmedPosition,
+                positionKeypair.publicKey.toBase58(),
+              ).pipe(Effect.catch(() => Effect.succeed("empty-reap")));
+              return yield* Effect.fail(
+                new AdapterError({
+                  message: `Entry deposited zero liquidity (${depositMode}) — empty position reaped, not tracked`,
+                  poolAddress,
+                }),
+              );
+            }
+
             return {
               positionPubKey: positionKeypair.publicKey.toBase58(),
               txSignature: signature,

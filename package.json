@@ -33,42 +33,44 @@
     "backtest": "bun cli/index.ts backtest",
     "test": "bun --bun vitest run",
     "test:watch": "bun --bun vitest",
-    "lint": "tsc --noEmit && oxlint engine ops bench cli scripts",
+    "typecheck": "tsrs --noEmit --fast",
+    "typecheck:tsc": "tsc --noEmit",
+    "lint": "bun run typecheck && oxlint engine ops bench cli scripts",
     "format": "oxfmt --write engine ops bench cli scripts",
     "format:check": "oxfmt --check engine ops bench cli scripts",
     "coverage": "bun --bun vitest run --coverage",
     "prepare": "effect-tsgo patch --oxlint || echo \"warning: effect-tsgo patch failed (unsupported platform or version mismatch) — type-aware effect lint disabled\""
   },
   "dependencies": {
-    "@clack/prompts": "^1.7.0",
-    "@coral-xyz/anchor": "^0.31.0",
+    "@clack/prompts": "^1.8.1",
+    "@coral-xyz/anchor": "^0.32.1",
+    "@huggingface/transformers": "^4.3.2",
     "@meteora-ag/dlmm": "^1.9.14",
     "@solana/spl-token": "^0.4.15",
-    "@solana/web3.js": "^1.98.4",
-    "@xenova/transformers": "^2.17.2",
-    "bs58": "^4.0.1",
-    "chalk": "^6.0.0",
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0",
     "commander": "^15.0.0",
-    "dotenv": "^17.4.2",
-    "effect": "4.0.0-rc.111",
+    "dotenv": "^18.0.9",
+    "effect": "4.1.0",
     "semver": "^7.8.5",
     "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
-    "@effect/tsgo": "0.36.5",
-    "@oxlint/plugins": "1.79.0",
-    "@types/node": "^26.1.2",
+    "@effect/tsgo": "0.63.0",
+    "@oxlint/plugins": "1.90.0",
+    "@types/node": "^26.6.6",
     "@types/semver": "^7.8.0",
-    "@vitest/coverage-istanbul": "^4.1.10",
+    "@vitest/coverage-istanbul": "^5.0.5",
     "bigint-buffer": "^1.1.5",
-    "bun-types": "1.4.0",
-    "fast-check": "^4.9.0",
-    "oxfmt": "^0.64.0",
-    "oxlint": "1.77.0",
-    "oxlint-tsgolint": "7.0.2001",
-    "tsdown": "^0.22.14",
+    "bun-types": "1.4.4",
+    "fast-check": "^4.10.2",
+    "oxfmt": "^0.75.0",
+    "oxlint": "1.90.0",
+    "oxlint-tsgolint": "7.0.2005",
+    "tsdown": "^0.23.4",
+    "tsrs": "^0.20.1-ts7.1.0-beta",
     "typescript": "7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.5"
   },
   "overrides": {
     "typescript": "$typescript"
@@ -76,5 +78,5 @@
   "engines": {
     "bun": ">=1.4.0"
   },
-  "packageManager": "bun@1.4.2"
+  "packageManager": "bun@1.4.4"
 }

@@ -349,7 +349,7 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
     const rows_ = poolRows(rows);
     const enters = rows_.filter((d) => d.action === "ENTER");
     expect(enters, "volume-known gecko pool must reach the ENTER push").toHaveLength(1);
-    expect(enters[0]!.reasoning).toContain("Strong pool");
+    expect(enters[0]!.reasoning).toContain("[normal-enter]");
   }, 15_000);
 
   it("datapi down + gecko down → heuristic, known-flags false, [fee-il-gate] skipped (volume-unknown blocks entry instead)", async () => {
@@ -444,7 +444,7 @@ describe("modeled fee/IL is excluded from EVERY ENTER gate (fees unknown)", () =
     // ratios and the pool is admitted on the measured conditions alone. (The
     // recorded ENTER decision may still be risk-rejected for confidence — a
     // separate gate; what proves exclusion is that the candidate gate no longer
-    // blocks on the modeled ratio, so the "Strong pool" decision is recorded.)
+    // blocks on the modeled ratio, so the "[normal-enter]" decision is recorded.)
     const layer = makeTestLayer({
       adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
       datapi: { getPoolData: () => Effect.succeed(null) }, // datapi down → gecko
@@ -466,7 +466,9 @@ describe("modeled fee/IL is excluded from EVERY ENTER gate (fees unknown)", () =
     expect(metrics!.feeIlRatio).toBeLessThan(1.8); // default minFeeIlRatio 1.2 × 1.5
     // …yet the pool reaches the ENTER push on measured signals (the "Strong
     // pool" reasoning is set only inside the candidate gate's score branch).
-    const enters = rows_.filter((d) => d.action === "ENTER" && d.reasoning.includes("Strong pool"));
+    const enters = rows_.filter(
+      (d) => d.action === "ENTER" && d.reasoning.includes("[normal-enter]"),
+    );
     expect(
       enters,
       "gecko pool must ENTER on measured signals despite the failing modeled ratio",
@@ -495,7 +497,9 @@ describe("modeled fee/IL is excluded from EVERY ENTER gate (fees unknown)", () =
     expect(metrics!.pool.statsSource).toBe("datapi");
     expect(metrics!.feeIlRatioKnown, "datapi fees are measured").toBe(true);
     expect(metrics!.feeIlRatio).toBeLessThan(1.8); // below the ×1.5 candidate floor
-    const enters = rows_.filter((d) => d.action === "ENTER" && d.reasoning.includes("Strong pool"));
+    const enters = rows_.filter(
+      (d) => d.action === "ENTER" && d.reasoning.includes("[normal-enter]"),
+    );
     expect(enters, "a known sub-×1.5 ratio must still gate the volume candidate").toHaveLength(0);
     const holds = rows_.filter((d) => d.action === "HOLD");
     expect(

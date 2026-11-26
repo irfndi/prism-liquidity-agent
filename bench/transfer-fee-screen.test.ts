@@ -3,6 +3,10 @@
  *  operator opts in, and the adapter's parsed-mint detection must spot the
  *  transferFeeConfig extension. */
 import { describe, it, expect } from "vitest";
+import { Effect } from "effect";
+import { program } from "../engine/program.js";
+import { AuditService } from "../engine/services.js";
+import { makeAdapter, makePool as makePoolState, makeTestLayer } from "./helpers.js";
 import {
   gateAndRankMarketPools,
   marketLegPasses,
@@ -181,6 +185,64 @@ describe("legHasTransferFee", () => {
     expect(legHasTransferFee("mintX", { transferFeeEnabled: false })).toBe(false);
     expect(legHasTransferFee("mintX", { transferFeeEnabled: undefined })).toBe(false);
   });
+});
+
+// The transfer-fee extension cannot be removed from a mint, so the per-pool
+// screen rejects the pool ONCE and the process quarantines it. Before this,
+// the live box recorded 48,723 identical `[safety]` HOLD rows and re-read the
+// mint every cycle. Held positions are still scanned (exits never stall).
+describe("transfer-fee screen quarantine (scan loop)", () => {
+  const FEE_POOL = "TransferFeeQuarantinePool111111111111111";
+  const FEE_MINT = "TransferFeeQuarantineMint1111111111111111";
+
+  it("rejects the pool once and drops it from the next cycle's scan set", async () => {
+    let mintReads = 0;
+    const layer = makeTestLayer({
+      adapter: makeAdapter(
+        { [FEE_POOL]: makePoolState({ address: FEE_POOL, tvlUsd: 250_000, tokenY: FEE_MINT }) },
+        {
+          getMintAuthorities: (mint: string) => {
+            mintReads += 1;
+            return Effect.succeed(
+              mint === FEE_MINT
+                ? { mintAuthority: null, freezeAuthority: null, transferFeeEnabled: true }
+                : { mintAuthority: null, freezeAuthority: null },
+            );
+          },
+        },
+      ),
+      configOverrides: {
+        watchlistPools: [FEE_POOL],
+        paperTrading: true,
+        scanIntervalMs: 100, // many cycles inside the race window
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      yield* Effect.raceFirst(program, Effect.sleep(1_200));
+      const audit = yield* AuditService;
+      return yield* audit.getRecentDecisions(500);
+    });
+    const decisions = await Effect.runPromise(
+      asOwner<
+        Effect.Effect<
+          ReadonlyArray<{ poolAddress: string; action: string; reasoning: string }>,
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
+    );
+
+    const safetyRejections = decisions.filter(
+      (d) => d.poolAddress === FEE_POOL && d.reasoning.includes("charges a transfer fee"),
+    );
+    expect(
+      safetyRejections.length,
+      `a quarantined pool must be screened exactly once, got ${safetyRejections.length} rows`,
+    ).toBe(1);
+    // One mint read per leg on the single screening pass — not per cycle.
+    expect(mintReads, "the mint must not be re-read on later cycles").toBeLessThanOrEqual(2);
+  }, 15_000);
 });
 
 describe("parsedMintHasTransferFee (adapter mint parse)", () => {

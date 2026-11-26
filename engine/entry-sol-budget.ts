@@ -61,3 +61,72 @@ export function estimateEntrySolLamports(input: {
 export function freeEntrySolLamports(nativeSolLamports: bigint): bigint {
   return nativeSolLamports > GAS_RESERVE_LAMPORTS ? nativeSolLamports - GAS_RESERVE_LAMPORTS : 0n;
 }
+
+export interface FitEntrySizeInput {
+  readonly desiredSizeUsd: number;
+  readonly freeSolLamports: bigint;
+  readonly solPriceUsd: number;
+  readonly poolHasSolLeg: boolean;
+  readonly solFunded: boolean;
+  /** Smallest position worth submitting (`ENTRY_SIZE_FLOOR_USD`). */
+  readonly minSizeUsd: number;
+}
+
+function fitsSolBudget(sizeUsd: number, input: FitEntrySizeInput): boolean {
+  return (
+    estimateEntrySolLamports({
+      positionSizeUsd: sizeUsd,
+      solPriceUsd: input.solPriceUsd,
+      poolHasSolLeg: input.poolHasSolLeg,
+      solFunded: input.solFunded,
+    }) <= input.freeSolLamports
+  );
+}
+
+/**
+ * Largest entry size at or below `desiredSizeUsd` that the free SOL can fund,
+ * or null when even `minSizeUsd` does not fit.
+ *
+ * Minimal-capital operation: instead of skipping a qualifying entry because the
+ * wallet is a few percent short, shrink the position (never below the $10
+ * floor). Smaller sizes only relax risk/allocation caps, so every downstream
+ * gate stays valid; the estimate is re-checked after the shrink so rounding
+ * can never over-commit. Whole-dollar sizes keep the intent readable.
+ */
+function hasUsableFitInput(input: FitEntrySizeInput): boolean {
+  return (
+    Number.isFinite(input.desiredSizeUsd) &&
+    input.desiredSizeUsd > 0 &&
+    Number.isFinite(input.solPriceUsd) &&
+    input.solPriceUsd > 0 &&
+    Number.isFinite(input.minSizeUsd) &&
+    input.minSizeUsd > 0 &&
+    input.freeSolLamports > 0n
+  );
+}
+
+/** Upper bound from the closed-form leg budget before the exact re-check. */
+function maxAffordableEntryUsd(input: FitEntrySizeInput): number | null {
+  const legFraction = input.solFunded ? 1 : input.poolHasSolLeg ? 0.5 : 0;
+  const fixed =
+    MIN_SOL_FOR_ENTRY_LAMPORTS + (input.poolHasSolLeg ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
+  if (legFraction === 0 || input.freeSolLamports <= fixed) return null;
+  const legBudgetSol = Number(input.freeSolLamports - fixed) / 1e9;
+  return (legBudgetSol * input.solPriceUsd) / (legFraction * SOL_PRICE_BUFFER_PCT);
+}
+
+export function fitEntrySizeToSolBudget(input: FitEntrySizeInput): number | null {
+  if (!hasUsableFitInput(input)) return null;
+  if (fitsSolBudget(input.desiredSizeUsd, input)) return input.desiredSizeUsd;
+
+  const maxUsd = maxAffordableEntryUsd(input);
+  if (maxUsd === null) return null;
+  const fitted = Math.floor(Math.min(input.desiredSizeUsd, maxUsd));
+  if (!Number.isFinite(fitted) || fitted < input.minSizeUsd) return null;
+
+  // Re-check the exact estimate (ceil/floor edges) and step down if needed.
+  for (let size = fitted; size >= input.minSizeUsd; size -= 1) {
+    if (fitsSolBudget(size, input)) return size;
+  }
+  return null;
+}

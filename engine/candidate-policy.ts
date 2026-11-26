@@ -46,6 +46,13 @@ export interface CandidateHealthInput {
 export type CandidateLifecycleEvent =
   | { readonly kind: "scan"; readonly observedAt: number; readonly health: CandidateHealth }
   | { readonly kind: "entry_confirmed"; readonly occurredAt: number }
+  /**
+   * The position that made this candidate `entered` is gone (closed via the
+   * decision tail, reconcile, an empty reap, or a paper exit). Without this
+   * the scan event ignores `entered` forever and the token is never
+   * re-admitted for the life of the row.
+   */
+  | { readonly kind: "entry_closed"; readonly occurredAt: number }
   | {
       readonly kind: "cooldown_started";
       readonly occurredAt: number;
@@ -222,6 +229,68 @@ function recordScan(
   }
 }
 
+/** `eligible` → `entered` on a confirmed ENTER; any other state is untouched. */
+function applyEntryConfirmed(
+  candidate: TokenCandidateRecord,
+  occurredAt: number,
+): TokenCandidateRecord {
+  if (candidate.state !== "eligible") return candidate;
+  return updateSeen(candidate, occurredAt, {
+    state: "entered",
+    enteredAt: occurredAt,
+    cooldownUntil: null,
+  });
+}
+
+/**
+ * `entered` → `discovered` when the position it represented is gone.
+ *
+ * Back to discovery with a fresh streak: the token has to re-qualify on fresh
+ * evidence (the pool-level cooldown, not this row, owns how soon re-entry is
+ * allowed). Only `entered` rows are affected.
+ */
+function applyEntryClosed(
+  candidate: TokenCandidateRecord,
+  occurredAt: number,
+): TokenCandidateRecord {
+  if (candidate.state !== "entered") return candidate;
+  return updateSeen(candidate, occurredAt, {
+    state: "discovered",
+    healthyScanCount: 0,
+    eligibleAt: null,
+    enteredAt: null,
+    cooldownUntil: null,
+    rejectionReason: null,
+  });
+}
+
+/** `entered` → `cooling_down` with the pool's exit cooldown. */
+function applyCooldownStarted(
+  candidate: TokenCandidateRecord,
+  occurredAt: number,
+  cooldownUntil: number,
+): TokenCandidateRecord {
+  if (candidate.state !== "entered") return candidate;
+  return updateSeen(candidate, occurredAt, { state: "cooling_down", cooldownUntil });
+}
+
+/** `cooling_down` → `discovered` once the cooldown has elapsed. */
+function applyCooldownElapsed(
+  candidate: TokenCandidateRecord,
+  occurredAt: number,
+): TokenCandidateRecord {
+  if (candidate.state !== "cooling_down") return candidate;
+  if (candidate.cooldownUntil === null) return candidate;
+  if (occurredAt < candidate.cooldownUntil) return candidate;
+  return updateSeen(candidate, occurredAt, {
+    state: "discovered",
+    healthyScanCount: 0,
+    eligibleAt: null,
+    cooldownUntil: null,
+    rejectionReason: null,
+  });
+}
+
 /** Applies one persisted lifecycle event while preserving monotonic timestamps. */
 export function transitionCandidate(
   candidate: TokenCandidateRecord,
@@ -232,31 +301,12 @@ export function transitionCandidate(
     case "scan":
       return recordScan(candidate, event.observedAt, event.health, policy);
     case "entry_confirmed":
-      return candidate.state === "eligible"
-        ? updateSeen(candidate, event.occurredAt, {
-            state: "entered",
-            enteredAt: event.occurredAt,
-            cooldownUntil: null,
-          })
-        : candidate;
+      return applyEntryConfirmed(candidate, event.occurredAt);
+    case "entry_closed":
+      return applyEntryClosed(candidate, event.occurredAt);
     case "cooldown_started":
-      return candidate.state === "entered"
-        ? updateSeen(candidate, event.occurredAt, {
-            state: "cooling_down",
-            cooldownUntil: event.cooldownUntil,
-          })
-        : candidate;
+      return applyCooldownStarted(candidate, event.occurredAt, event.cooldownUntil);
     case "cooldown_elapsed":
-      return candidate.state === "cooling_down" &&
-        candidate.cooldownUntil !== null &&
-        event.occurredAt >= candidate.cooldownUntil
-        ? updateSeen(candidate, event.occurredAt, {
-            state: "discovered",
-            healthyScanCount: 0,
-            eligibleAt: null,
-            cooldownUntil: null,
-            rejectionReason: null,
-          })
-        : candidate;
+      return applyCooldownElapsed(candidate, event.occurredAt);
   }
 }

@@ -1142,15 +1142,16 @@ describe("launch-cap boundary", () => {
 // ─── Empty-position reap (zero-liquidity on-chain account) ──────────────────
 // A position with totalX==totalY==0 (empty on-chain) cannot be withdrawn: the
 // SDK's removeLiquidity dereferences activeBins[0] and throws. exitPosition
-// now reaps it (isEmptyReap:true), and the EXIT path must settle the ledger as
-// a NO-OP (realized 0, no rug-block) rather than book a fabricated -deposited
-// loss against the suspect basis. Regression for the 6GmA/SOL ghost that
-// crash-looped a live EXIT every cycle.
+// now reaps it (isEmptyReap:true), and the EXIT path must settle the ledger
+// as n/a (`realizedPnlUsd = null`, no rug-block) rather than booking either a
+// fabricated -deposited loss or a break-even 0 against the suspect basis.
+// Regression for the 6GmA/SOL ghost that crash-looped a live EXIT every cycle
+// and for the 11 launch closes recorded as a silent $0.00.
 describe("empty-position reap (zero-liquidity on-chain account)", () => {
   const POOL = "EmptyReapPool111111111111111111";
   const FAKE_MINT = "FakeToken111111111111111111111111111111111111";
 
-  it("settles the ledger with realized 0 and no rug-block instead of crash-looping", async () => {
+  it("settles the ledger as n/a and no rug-block instead of crash-looping", async () => {
     const exitSpy = vi.fn(() =>
       Effect.succeed({
         txSignature: "empty-reap",
@@ -1217,8 +1218,8 @@ describe("empty-position reap (zero-liquidity on-chain account)", () => {
     ).toBeDefined();
     expect(
       reaped!.realizedPnlUsd,
-      "an empty reap realizes 0, never the -deposited phantom loss",
-    ).toBe(0);
+      "an empty reap is unpriced: never the -deposited phantom loss, never a fake 0",
+    ).toBeNull();
     expect(rugBlock, "an empty reap must not rug-block the suspect token").toBeNull();
   }, 15_000);
 });

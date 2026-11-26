@@ -210,15 +210,12 @@ export function loadPersistedCache(
   db: TokenMetadataDb,
   namespace: string,
 ): Effect.Effect<Map<string, CacheEntry>, never> {
-  // Wrap the db read in Effect.try and drive it with runSync so BOTH a typed
-  // failure and a defect thrown inside the underlying Effect.sync (how
-  // DbLive.getMetadata is implemented) surface as a recoverable typed error.
-  // Effect.catch then swallows it fail-open.
-  return Effect.try({
-    try: () => Effect.runSync(db.getMetadata(metaCacheKey(namespace))),
-    catch: () => new Error("token metadata cache read failed"),
-  }).pipe(
-    Effect.catch(() => Effect.succeed(null)),
+  // Stay inside the effect: catchCause converts BOTH a typed failure and a
+  // defect thrown by the DbLive Effect.sync into the fail-open empty cache.
+  // (The old nested Effect.runSync blocked the fiber and lost the layer
+  // context for no benefit.)
+  return db.getMetadata(metaCacheKey(namespace)).pipe(
+    Effect.catchCause(() => Effect.succeed<string | null>(null)),
     Effect.map((raw) => (raw === null ? new Map() : deserializeCache(raw))),
   );
 }
@@ -232,8 +229,7 @@ export function savePersistedCache(
   namespace: string,
   map: Map<string, CacheEntry>,
 ): Effect.Effect<void, never> {
-  return Effect.try({
-    try: () => Effect.runSync(db.setMetadata(metaCacheKey(namespace), serializeCache(map))),
-    catch: () => new Error("token metadata cache write failed"),
-  }).pipe(Effect.catch(() => Effect.void));
+  return db
+    .setMetadata(metaCacheKey(namespace), serializeCache(map))
+    .pipe(Effect.catchCause(() => Effect.void));
 }

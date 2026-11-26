@@ -55,7 +55,7 @@ function mockCredentialsFile(apiKey = "test-api-key"): void {
   // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   vi.spyOn(fs, "readFileSync").mockImplementation(((path: fs.PathOrFileDescriptor) => {
     if (String(path).includes("credentials.json")) {
-      return JSON.stringify({ apiKey });
+      return Buffer.from(JSON.stringify({ apiKey }));
     }
     throw new Error(`ENOENT: no such file: ${String(path)}`);
   }) as typeof fs.readFileSync);

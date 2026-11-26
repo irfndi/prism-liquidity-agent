@@ -462,16 +462,17 @@ describe("adapter.rebalancePosition (atomic via SDK rebalancePosition)", () => {
     ) as Layer.Layer<AdapterService, never, never>;
 
     const err = await Effect.runPromise(
-      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
-      Effect.provide(
-        Effect.gen(function* () {
-          const adapter = yield* AdapterService;
-          return yield* adapter
-            .rebalancePosition(POOL_ADDRESS, POSITION_ADDRESS, 4990, 5030)
-            .pipe(Effect.flip);
-        }),
-        layer,
-      ) as Effect.Effect<unknown, never, never>,
+      asOwner<Effect.Effect<unknown, never, never>>(
+        Effect.provide(
+          Effect.gen(function* () {
+            const adapter = yield* AdapterService;
+            return yield* adapter
+              .rebalancePosition(POOL_ADDRESS, POSITION_ADDRESS, 4990, 5030)
+              .pipe(Effect.flip);
+          }),
+          layer,
+        ),
+      ),
     );
 
     // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
