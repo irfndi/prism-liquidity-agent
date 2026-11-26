@@ -11,6 +11,7 @@ import {
   taExhaustionNetPnlUsd,
   taExhaustionReasoning,
   taExhaustionSignals,
+  taExhaustionVote,
   TA_EXHAUSTION_DEFAULT_POLICY,
   type TaExhaustionExitInput,
 } from "../engine/ta-exhaustion.js";
@@ -93,6 +94,51 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
     expect(net).toBeCloseTo(12 - (2 * 0.005 * 1_000 + 2 * 0.005 + 0.05 * 10), 6);
   });
 
+  it("adds pending live fees the close withdrawal sweeps (unreadable → unknown)", () => {
+    const base = {
+      depositedUsd: 1_000,
+      currentValueUsd: 980,
+      cumulativeFeesClaimedUsd: 0,
+      cumulativeRewardsClaimedUsd: 0,
+      ageMs: 0,
+      paperTrading: false,
+      swapCostPct: 0.005,
+      harvestCostUsd: 0.01,
+      txCostUsd: 0.005,
+    };
+    // mark loss 20 + pending 30 − close costs (5 + 2 × 0.005) → +4.99
+    expect(taExhaustionNetPnlUsd({ ...base, pendingFeesUsd: 30 })).toBeCloseTo(4.99, 6);
+    expect(taExhaustionNetPnlUsd({ ...base, pendingFeesUsd: 0 })).toBeCloseTo(-25.01, 6);
+    expect(Number.isNaN(taExhaustionNetPnlUsd({ ...base, pendingFeesUsd: Number.NaN }))).toBe(true);
+  });
+
+  it("debits prior paper rebalance costs the settlement charges", () => {
+    const net = taExhaustionNetPnlUsd({
+      depositedUsd: 1_000,
+      currentValueUsd: 1_011,
+      cumulativeFeesClaimedUsd: 0,
+      cumulativeRewardsClaimedUsd: 0,
+      ageMs: 0,
+      paperTrading: true,
+      rebalanceCostsUsd: 1.5,
+    });
+    // 11 − 10.01 close costs − 1.50 rebalance = −0.51 (settlement-identical sign)
+    expect(net).toBeCloseTo(-0.51, 6);
+  });
+
+  it("a fallback mark (live HODL/deposit) is UNKNOWN, never a profit", () => {
+    const net = taExhaustionNetPnlUsd({
+      depositedUsd: 1_000,
+      currentValueUsd: 1_050,
+      cumulativeFeesClaimedUsd: 1,
+      cumulativeRewardsClaimedUsd: 0,
+      ageMs: 0,
+      paperTrading: false,
+      markKnown: false,
+    });
+    expect(Number.isNaN(net)).toBe(true);
+  });
+
   it("the live model debits one exit swap leg plus gas (no conversion)", () => {
     const net = taExhaustionNetPnlUsd({
       depositedUsd: 1_000,
@@ -123,6 +169,25 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
 });
 
 describe("TA-exhaustion policy gates", () => {
+  it("the pure vote preflight fires only when enabled, mature and confluent", () => {
+    expect(taExhaustionVote({ closes: TRIGGER_CLOSES, ageMs: 0 })).not.toBeNull();
+    expect(
+      taExhaustionVote({
+        closes: TRIGGER_CLOSES,
+        ageMs: 0,
+        policy: { ...TA_EXHAUSTION_DEFAULT_POLICY, enabled: false },
+      }),
+    ).toBeNull();
+    expect(
+      taExhaustionVote({
+        closes: TRIGGER_CLOSES,
+        ageMs: 0,
+        policy: { ...TA_EXHAUSTION_DEFAULT_POLICY, minHoldMs: 1 },
+      }),
+    ).toBeNull();
+    expect(taExhaustionVote({ closes: [90, 90.9], ageMs: 0 })).toBeNull();
+  });
+
   it("fires on the confluence with behavior-preserving defaults", () => {
     const decision = maybeTaExhaustionExit(exitInput({ netPnlUsd: -1 }));
     expect(decision).not.toBeNull();

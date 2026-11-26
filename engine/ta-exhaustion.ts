@@ -278,6 +278,14 @@ export interface TaExhaustionNetPnlInput {
   readonly currentValueUsd: number;
   readonly cumulativeFeesClaimedUsd: number;
   readonly cumulativeRewardsClaimedUsd: number;
+  /** Live pending swap fees (feeX/feeY) the close withdrawal will sweep.
+   *  NaN when unreadable — the whole projection becomes unknown. */
+  readonly pendingFeesUsd?: number | undefined;
+  /** Prior paper rebalance costs the settlement debits from realized P&L. */
+  readonly rebalanceCostsUsd?: number | undefined;
+  /** False when the caller's mark is a fallback (live HODL/deposit) rather
+   *  than a valuation of what a close would withdraw. Defaults true. */
+  readonly markKnown?: boolean | undefined;
   readonly ageMs: number;
   /** Paper and live close models debit different real costs. */
   readonly paperTrading: boolean;
@@ -288,19 +296,23 @@ export interface TaExhaustionNetPnlInput {
 }
 
 /**
- * Projected realized P&L at close: mark value + claimed fees + rewards − cost
- * basis − the modeled close costs the settlement path debits. This is the
- * figure the label and the optional P&L gate read; it is deliberately not a
- * ledger value (the close measures the real withdrawal). Unknown cost knobs
- * fall back to the same defaults `resolvePaperExitSettlement` /
- * `liveCloseCostInput` use.
+ * Projected realized P&L at close: mark value + claimed fees + rewards +
+ * pending live fees − cost basis − prior rebalance costs − the modeled close
+ * costs the settlement path debits. This is the figure the label and the
+ * optional P&L gate read; it is deliberately not a ledger value (the close
+ * measures the real withdrawal). Unknown inputs (an unpriced/fallback mark,
+ * an unreadable pending-fee amount, a non-finite gross) return NaN — the
+ * caller then labels the outcome unknown and the gate fails closed.
  */
 export function taExhaustionNetPnlUsd(input: TaExhaustionNetPnlInput): number {
+  if (input.markKnown === false) return Number.NaN;
   const gross =
     input.currentValueUsd +
     input.cumulativeFeesClaimedUsd +
-    input.cumulativeRewardsClaimedUsd -
-    input.depositedUsd;
+    input.cumulativeRewardsClaimedUsd +
+    (input.pendingFeesUsd ?? 0) -
+    input.depositedUsd -
+    (input.rebalanceCostsUsd ?? 0);
   if (!Number.isFinite(gross)) return Number.NaN;
   return gross - taCloseCostsUsd(input, taAgeDays(input.ageMs));
 }
@@ -375,12 +387,19 @@ export interface TaExhaustionExitInput {
   readonly policy?: TaExhaustionPolicy | undefined;
 }
 
+export interface TaExhaustionVoteInput {
+  readonly closes: readonly number[];
+  /** Position age in ms (drives the optional minimum-hold floor). */
+  readonly ageMs: number;
+  readonly policy?: TaExhaustionPolicy | undefined;
+}
+
 /**
- * EXIT vote in `conf1PositionExit` shape (action EXIT, confidence 1.0).
- * Null when disabled, too young, cold/junk (fail-open) or without confluence.
- * The caller places it after the TP-ladder branch and before loss-side exits.
+ * Enabled + mature + confluence → signals; null means no vote (fail-open).
+ * The program uses this as a cheap pure preflight so the per-position
+ * rebalance-cost/pending-fee reads only run when the gate would fire.
  */
-export function maybeTaExhaustionExit(input: TaExhaustionExitInput): AgentDecision | null {
+export function taExhaustionVote(input: TaExhaustionVoteInput): TaExhaustionSignals | null {
   const policy = input.policy ?? TA_EXHAUSTION_DEFAULT_POLICY;
   if (!policy.enabled) return null;
   const minHoldMs = Math.max(finiteOr(policy.minHoldMs, 0), 0);
@@ -390,6 +409,18 @@ export function maybeTaExhaustionExit(input: TaExhaustionExitInput): AgentDecisi
   if (!isTaExhausted(signals.rsiOverbought, signals.aboveBbUpper, signals.macdFirstGreen)) {
     return null;
   }
+  return signals;
+}
+
+/**
+ * EXIT vote in `conf1PositionExit` shape (action EXIT, confidence 1.0).
+ * Null when disabled, too young, cold/junk (fail-open) or without confluence.
+ * The caller places it after the TP-ladder branch and before loss-side exits.
+ */
+export function maybeTaExhaustionExit(input: TaExhaustionExitInput): AgentDecision | null {
+  const policy = input.policy ?? TA_EXHAUSTION_DEFAULT_POLICY;
+  const signals = taExhaustionVote(input);
+  if (signals === null) return null;
   if (
     !taExhaustionPnlGateSatisfied({
       netPnlUsd: input.netPnlUsd,

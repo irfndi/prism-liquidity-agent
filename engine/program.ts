@@ -96,6 +96,7 @@ import {
   resolveTaExhaustionPolicy,
   TA_EXHAUSTION_MIN_POINTS,
   taExhaustionNetPnlUsd,
+  taExhaustionVote,
 } from "./ta-exhaustion.js";
 import {
   gateAndRankLaunchPools,
@@ -6658,6 +6659,9 @@ export const program = Effect.gen(function* () {
     ...(config.feeCaptureConversionCostPct !== undefined
       ? { feeCaptureConversionCostPct: config.feeCaptureConversionCostPct }
       : undefined),
+    ...(config.harvestTxCostUsdEst !== undefined
+      ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
+      : undefined),
     rebalanceCostUsd: config.rebalanceGasCostSol * config.solPriceUsd,
     debitPaperCash: (sizeUsd: number): void => {
       if (finiteNonNegativeNumber(sizeUsd)) paperCashUsd -= sizeUsd;
@@ -10767,6 +10771,10 @@ export const program = Effect.gen(function* () {
           const fallbackMark = paperMark ?? estimatePositionValue(pos, pool);
           const estimatedValue = realMark !== null ? realMark : fallbackMark;
           pos.currentValueUsd = estimatedValue;
+          // Provenance for P&L-gated exits: a live fallback (HODL/deposit) is
+          // NOT a valuation of what a close would withdraw, while paper's
+          // fallback is exactly the mark its settlement books.
+          pos.valueMarkKnown = realMark !== null || pos.positionPubKey == null;
           const highest = pos.highestValueUsd ?? pos.depositedUsd;
           if (estimatedValue > highest) {
             pos.highestValueUsd = estimatedValue;
@@ -11315,7 +11323,7 @@ export const program = Effect.gen(function* () {
           // history. The reasoning is P&L-honest (projected realized net of
           // modeled close costs) and the rule is config-gated; defaults keep
           // the pre-#237 behavior. Fail-open null when cold/junk.
-          const taExit = checkTaExhaustionExit(taCloses, pos);
+          const taExit = yield* checkTaExhaustionExit(taCloses, pos);
           if (taExit) return taExit;
           if (w15Signals.depeg || w15Signals.liquidityDrain) {
             return conf1PositionExit(
@@ -11323,38 +11331,76 @@ export const program = Effect.gen(function* () {
               buildW15ExitReasoning(w15Signals.depeg, w15Signals.liquidityDrain),
             );
           }
+          function taPolicy() {
+            return resolveTaExhaustionPolicy({
+              enabled: config.taExhaustionEnabled,
+              rsiThreshold: config.taExhaustionRsiThreshold,
+              minHoldMs: config.taExhaustionMinHoldMs,
+              requireNonnegativePnl: config.taExhaustionRequireNonnegativePnl,
+              minFeeIlRatio: config.taExhaustionMinFeeIlRatio,
+            });
+          }
+          // Paper settlement debits the modeled costs of every prior rebalance
+          // (paperRebalanceCostsUsd over the position's REBALANCE events), so
+          // the projection must debit them too. A read failure matches the
+          // close path (caught → no rebalance costs).
+          function readTaRebalanceCosts(position: PositionRecord): Effect.Effect<number, never> {
+            if (!config.paperTrading) return Effect.succeed(0);
+            return db.getPositionEvents(poolAddress).pipe(
+              Effect.map((events) => paperRebalanceCostsUsd(events, position.positionId)),
+              Effect.catch(() => Effect.succeed(0)),
+            );
+          }
+          // A live close withdraws the position's pending swap fees, which the
+          // mark (position holdings) does not include. Paper mode never closes
+          // a live row, so it skips the extra chain read. Unreadable/unpriceable
+          // pending fees make the whole projection unknown (fail-closed).
+          function readTaPendingFeesUsd(position: PositionRecord): Effect.Effect<number, never> {
+            if (config.paperTrading || position.positionPubKey === null) return Effect.succeed(0);
+            const read = adapter.getClaimableFeesUsd;
+            if (read === undefined) return Effect.succeed(Number.NaN);
+            return read(poolAddress, position.positionPubKey).pipe(
+              Effect.map((usd) => (usd === null ? Number.NaN : usd)),
+              Effect.catch(() => Effect.succeed(Number.NaN)),
+            );
+          }
           function checkTaExhaustionExit(
             closes: readonly number[],
             position: PositionRecord,
-          ): AgentDecision | null {
-            const ageMs = Math.max(Date.now() - position.timestamp, 0);
-            return maybeTaExhaustionExit({
-              poolAddress,
-              positionId: position.positionId,
-              closes,
-              ageMs,
-              netPnlUsd: taExhaustionNetPnlUsd({
-                depositedUsd: position.depositedUsd,
-                currentValueUsd: position.currentValueUsd,
-                cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
-                cumulativeRewardsClaimedUsd: position.cumulativeRewardsClaimedUsd,
+          ): Effect.Effect<AgentDecision | null, never> {
+            return Effect.gen(function* () {
+              const policy = taPolicy();
+              const ageMs = Math.max(Date.now() - position.timestamp, 0);
+              // Pure preflight: the per-position DB/SDK reads below only run
+              // when the confluence would actually vote.
+              if (taExhaustionVote({ closes, ageMs, policy }) === null) return null;
+              const rebalanceCostsUsd = yield* readTaRebalanceCosts(position);
+              const pendingFeesUsd = yield* readTaPendingFeesUsd(position);
+              return maybeTaExhaustionExit({
+                poolAddress,
+                positionId: position.positionId,
+                closes,
                 ageMs,
-                paperTrading: config.paperTrading,
-                swapCostPct: config.runnerSwapCostPct,
-                harvestCostUsd: config.feeCaptureHarvestCostUsd,
-                conversionCostPct: config.feeCaptureConversionCostPct,
-                txCostUsd: config.harvestTxCostUsdEst,
-              }),
-              // Modeled fee/IL (gecko/heuristic) can never satisfy the gate's
-              // alternative leg — same known-flag split as every other consumer.
-              feeIlRatio: metrics.feeIlRatioKnown ? feeIlRatio : null,
-              policy: resolveTaExhaustionPolicy({
-                enabled: config.taExhaustionEnabled,
-                rsiThreshold: config.taExhaustionRsiThreshold,
-                minHoldMs: config.taExhaustionMinHoldMs,
-                requireNonnegativePnl: config.taExhaustionRequireNonnegativePnl,
-                minFeeIlRatio: config.taExhaustionMinFeeIlRatio,
-              }),
+                netPnlUsd: taExhaustionNetPnlUsd({
+                  depositedUsd: position.depositedUsd,
+                  currentValueUsd: position.currentValueUsd,
+                  cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
+                  cumulativeRewardsClaimedUsd: position.cumulativeRewardsClaimedUsd,
+                  pendingFeesUsd,
+                  rebalanceCostsUsd,
+                  markKnown: position.valueMarkKnown === true,
+                  ageMs,
+                  paperTrading: config.paperTrading,
+                  swapCostPct: config.runnerSwapCostPct,
+                  harvestCostUsd: config.feeCaptureHarvestCostUsd,
+                  conversionCostPct: config.feeCaptureConversionCostPct,
+                  txCostUsd: config.harvestTxCostUsdEst,
+                }),
+                // Modeled fee/IL (gecko/heuristic) can never satisfy the gate's
+                // alternative leg — same known-flag split as every other consumer.
+                feeIlRatio: metrics.feeIlRatioKnown ? feeIlRatio : null,
+                policy,
+              });
             });
           }
           function checkIlDominanceExit(): Effect.Effect<AgentDecision | null, Error> {
