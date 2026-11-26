@@ -337,6 +337,20 @@ export interface AppConfig {
   readonly entryMomentumScoreWeight?: number;
   readonly takeProfitEnabled?: boolean;
   readonly takeProfitPct?: number;
+  /** TA-exhaustion EXIT master switch (#237). Default true — preserves the
+   *  pre-#237 always-on behavior; false disables the gate entirely. */
+  readonly taExhaustionEnabled?: boolean;
+  /** RSI(2) strict-overbought trip line (#237). Default 90, bounded [50, 100]. */
+  readonly taExhaustionRsiThreshold?: number;
+  /** Minimum position age before the TA-exhaustion EXIT may fire (#237).
+   *  0 disables the floor (default). */
+  readonly taExhaustionMinHoldMs?: number;
+  /** Require non-negative projected P&L before the TA-exhaustion EXIT fires
+   *  (#237). Default false; a measured fee/IL at or above
+   *  `taExhaustionMinFeeIlRatio` satisfies the gate's alternative leg. */
+  readonly taExhaustionRequireNonnegativePnl?: boolean;
+  /** Fee/IL floor for the P&L gate's alternative leg (#237). Default 1.2. */
+  readonly taExhaustionMinFeeIlRatio?: number;
   readonly backtestTolerateEmptyBins?: boolean;
   /** How many top-ranked market pools are actively scanned each cycle. */
   readonly marketScanTopK?: number;
@@ -2217,6 +2231,34 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
   const takeProfitPct = yield* validatedNumber("TAKE_PROFIT_PCT", 0.01, 0.15); // 0 would build an at-entry rung -> instant zero-profit EXIT
+  // TA-exhaustion EXIT policy (#237): the trigger is price-only, so its
+  // threshold, hold floor and an optional P&L gate are operator-tunable.
+  // Defaults keep the pre-#237 behavior: enabled, RSI(2) > 90, no min hold,
+  // no P&L requirement.
+  const taExhaustionEnabled = yield* Config.boolean("TA_EXHAUSTION_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const taExhaustionRsiThreshold = yield* validatedNumber(
+    "TA_EXHAUSTION_RSI_THRESHOLD",
+    50,
+    90,
+    100,
+  );
+  const taExhaustionMinHoldMs = yield* validatedNumber(
+    "TA_EXHAUSTION_MIN_HOLD_MS",
+    0,
+    0,
+    604_800_000,
+  );
+  const taExhaustionRequireNonnegativePnl = yield* Config.boolean(
+    "TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL",
+  ).pipe(Effect.orElseSucceed(() => false));
+  const taExhaustionMinFeeIlRatio = yield* validatedNumber(
+    "TA_EXHAUSTION_MIN_FEE_IL_RATIO",
+    0,
+    1.2,
+    20,
+  );
   // D: backtest replay fidelity — empty-bin snapshots must not reject every
   // tick (paper DB stores bins:[] so the replay admitted nothing).
   const backtestTolerateEmptyBins = yield* Config.boolean("BACKTEST_TOLERATE_EMPTY_BINS").pipe(
@@ -2544,6 +2586,11 @@ const loadConfig = Effect.gen(function* () {
     entryMomentumScoreWeight,
     takeProfitEnabled,
     takeProfitPct,
+    taExhaustionEnabled,
+    taExhaustionRsiThreshold,
+    taExhaustionMinHoldMs,
+    taExhaustionRequireNonnegativePnl,
+    taExhaustionMinFeeIlRatio,
     backtestTolerateEmptyBins,
     marketScanTopK,
     marketScanMaxPools,

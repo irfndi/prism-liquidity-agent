@@ -91,7 +91,12 @@ import {
   feeStarvationReasoning,
 } from "./max-position-age.js";
 import { taggedExitReason } from "./exit-reason.js";
-import { maybeTaExhaustionExit, TA_EXHAUSTION_MIN_POINTS } from "./ta-exhaustion.js";
+import {
+  maybeTaExhaustionExit,
+  resolveTaExhaustionPolicy,
+  TA_EXHAUSTION_MIN_POINTS,
+  taExhaustionNetPnlUsd,
+} from "./ta-exhaustion.js";
 import {
   gateAndRankLaunchPools,
   summarizeLaunchRejections,
@@ -11273,6 +11278,8 @@ export const program = Effect.gen(function* () {
         ilDominance: IlDominanceSignal | null,
       ): Effect.Effect<AgentDecision | null, Error> {
         function readTaCloses(): Effect.Effect<readonly number[], Error> {
+          // A disabled gate needs no price-history read (TA_EXHAUSTION_ENABLED).
+          if ((config.taExhaustionEnabled ?? true) !== true) return Effect.succeed([]);
           return Effect.gen(function* () {
             // TA closes feed: current_price history over a window sized for
             // TA_EXHAUSTION_MIN_POINTS closes with 2x slack for missed cycles;
@@ -11304,9 +11311,10 @@ export const program = Effect.gen(function* () {
           const taCloses = yield* readTaCloses();
           const lifecycleExit = checkLifecycleExit();
           if (lifecycleExit) return lifecycleExit;
-          // TA-exhaustion EXIT (profit-exhaustion before loss-side gates):
-          // RSI(2)>90 + BB-upper/MACD-green confluence over current_price
-          // history; fail-open null when cold/junk (never throws).
+          // TA-exhaustion EXIT (#237): RSI(2) confluence over current_price
+          // history. The reasoning is P&L-honest (projected realized net of
+          // modeled close costs) and the rule is config-gated; defaults keep
+          // the pre-#237 behavior. Fail-open null when cold/junk.
           const taExit = checkTaExhaustionExit(taCloses, pos);
           if (taExit) return taExit;
           if (w15Signals.depeg || w15Signals.liquidityDrain) {
@@ -11319,10 +11327,34 @@ export const program = Effect.gen(function* () {
             closes: readonly number[],
             position: PositionRecord,
           ): AgentDecision | null {
+            const ageMs = Math.max(Date.now() - position.timestamp, 0);
             return maybeTaExhaustionExit({
               poolAddress,
               positionId: position.positionId,
               closes,
+              ageMs,
+              netPnlUsd: taExhaustionNetPnlUsd({
+                depositedUsd: position.depositedUsd,
+                currentValueUsd: position.currentValueUsd,
+                cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
+                cumulativeRewardsClaimedUsd: position.cumulativeRewardsClaimedUsd,
+                ageMs,
+                paperTrading: config.paperTrading,
+                swapCostPct: config.runnerSwapCostPct,
+                harvestCostUsd: config.feeCaptureHarvestCostUsd,
+                conversionCostPct: config.feeCaptureConversionCostPct,
+                txCostUsd: config.harvestTxCostUsdEst,
+              }),
+              // Modeled fee/IL (gecko/heuristic) can never satisfy the gate's
+              // alternative leg — same known-flag split as every other consumer.
+              feeIlRatio: metrics.feeIlRatioKnown ? feeIlRatio : null,
+              policy: resolveTaExhaustionPolicy({
+                enabled: config.taExhaustionEnabled,
+                rsiThreshold: config.taExhaustionRsiThreshold,
+                minHoldMs: config.taExhaustionMinHoldMs,
+                requireNonnegativePnl: config.taExhaustionRequireNonnegativePnl,
+                minFeeIlRatio: config.taExhaustionMinFeeIlRatio,
+              }),
             });
           }
           function checkIlDominanceExit(): Effect.Effect<AgentDecision | null, Error> {

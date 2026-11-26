@@ -8,6 +8,16 @@
  * TP-ladder branch (`evaluateTpTargetExit`, program.ts:10326) and BEFORE
  * loss-side exits, so exhaustion locks profits before capital protection.
  *
+ * The confluence is price-only (#237): it never reads the position's cost
+ * basis by itself, and on live paper runs it fired on positions that were
+ * already net-negative. The caller therefore supplies the projected realized
+ * P&L (mark value + claimed fees − cost basis − modeled close costs) and the
+ * reasoning is only allowed to claim "profit-exhaustion" when that figure is
+ * non-negative. The optional P&L gate (`TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL`,
+ * default off) suppresses the exit on a losing position unless the measured
+ * pool fee/IL still clears its own floor. All new policy knobs preserve the
+ * pre-#237 always-on behavior at their defaults.
+ *
  * Cold start: every entry point returns null below
  * `TA_EXHAUSTION_MIN_POINTS` (fail-open no-vote, like drift). Parameters are
  * textbook defaults — BB(20, 2), MACD(12, 26, 9); the 35-point floor is the
@@ -17,6 +27,7 @@
  */
 
 import type { AgentDecision } from "./types.js";
+import { liveCloseCostsUsd, paperCloseCostsUsd } from "./fee-capture.js";
 
 /** Minimum closes for a vote: MACD(12,26,9) current + previous histogram. */
 export const TA_EXHAUSTION_MIN_POINTS = 35;
@@ -32,6 +43,56 @@ export const TA_BB_MULT = 2;
 export const TA_MACD_FAST_PERIOD = 12;
 export const TA_MACD_SLOW_PERIOD = 26;
 export const TA_MACD_SIGNAL_PERIOD = 9;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export interface TaExhaustionPolicy {
+  /** Master switch. Default true (the pre-#237 always-on behavior). */
+  readonly enabled: boolean;
+  /** RSI(2) strict-overbought trip line. Default 90. */
+  readonly rsiThreshold: number;
+  /** Minimum position age before the exit may fire. 0 disables. Default 0. */
+  readonly minHoldMs: number;
+  /** Require non-negative projected P&L (or a measured fee/IL clearing the
+   *  floor). Default false — the pre-#237 ungated behavior. */
+  readonly requireNonnegativePnl: boolean;
+  /** Fee/IL ratio that satisfies the P&L gate's alternative leg. Default 1.2. */
+  readonly minFeeIlRatio: number;
+}
+
+/** Behavior-preserving defaults: on, RSI > 90, no hold floor, no P&L gate. */
+export const TA_EXHAUSTION_DEFAULT_POLICY: TaExhaustionPolicy = {
+  enabled: true,
+  rsiThreshold: TA_RSI_OVERBOUGHT,
+  minHoldMs: 0,
+  requireNonnegativePnl: false,
+  minFeeIlRatio: 1.2,
+};
+
+/**
+ * Merge partial (config-derived) overrides into the defaults. Non-finite or
+ * absent numbers fall back to the documented default; booleans fall back too.
+ */
+export function resolveTaExhaustionPolicy(overrides: {
+  readonly enabled?: boolean | undefined;
+  readonly rsiThreshold?: number | undefined;
+  readonly minHoldMs?: number | undefined;
+  readonly requireNonnegativePnl?: boolean | undefined;
+  readonly minFeeIlRatio?: number | undefined;
+}): TaExhaustionPolicy {
+  const defaults = TA_EXHAUSTION_DEFAULT_POLICY;
+  return {
+    enabled: overrides.enabled ?? defaults.enabled,
+    rsiThreshold: finiteOr(overrides.rsiThreshold, defaults.rsiThreshold),
+    minHoldMs: Math.max(finiteOr(overrides.minHoldMs, defaults.minHoldMs), 0),
+    requireNonnegativePnl: overrides.requireNonnegativePnl ?? defaults.requireNonnegativePnl,
+    minFeeIlRatio: Math.max(finiteOr(overrides.minFeeIlRatio, defaults.minFeeIlRatio), 0),
+  };
+}
+
+function finiteOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) ? value : fallback;
+}
 
 function allFinite(values: readonly number[]): boolean {
   return values.every((v) => Number.isFinite(v));
@@ -157,6 +218,7 @@ export function computeMacdHistogram(closes: readonly number[]): {
 /** Indicator snapshot behind one EXIT vote. */
 export interface TaExhaustionSignals {
   readonly rsi2: number;
+  readonly rsiThreshold: number;
   readonly rsiOverbought: boolean;
   readonly percentB: number;
   readonly aboveBbUpper: boolean;
@@ -167,10 +229,15 @@ export interface TaExhaustionSignals {
 
 /**
  * Full indicator read. Null below `TA_EXHAUSTION_MIN_POINTS` (fail-open
- * no-vote) or on junk — never throws on market data.
+ * no-vote) or on junk — never throws on market data. `rsiThreshold` defaults
+ * to the textbook 90; a non-finite override falls back to it.
  */
-export function taExhaustionSignals(closes: readonly number[]): TaExhaustionSignals | null {
+export function taExhaustionSignals(
+  closes: readonly number[],
+  rsiThreshold: number = TA_RSI_OVERBOUGHT,
+): TaExhaustionSignals | null {
   if (closes.length < TA_EXHAUSTION_MIN_POINTS) return null;
+  const threshold = resolveRsiThreshold(rsiThreshold);
   const rsi2 = computeRsi2(closes);
   const percentB = computeBollingerPercentB(closes);
   const upper = computeBollingerUpper(closes);
@@ -180,13 +247,18 @@ export function taExhaustionSignals(closes: readonly number[]): TaExhaustionSign
   if (close === undefined || !Number.isFinite(close)) return null;
   return {
     rsi2,
-    rsiOverbought: rsi2 > TA_RSI_OVERBOUGHT,
+    rsiThreshold: threshold,
+    rsiOverbought: rsi2 > threshold,
     percentB,
     aboveBbUpper: close > upper,
     histogram: macd.current,
     previousHistogram: macd.previous,
     macdFirstGreen: macd.current > 0 && macd.previous <= 0,
   };
+}
+
+function resolveRsiThreshold(value: number): number {
+  return Number.isFinite(value) ? value : TA_RSI_OVERBOUGHT;
 }
 
 /**
@@ -201,27 +273,130 @@ export function isTaExhausted(
   return rsiOverbought && (aboveBbUpper || macdFirstGreen);
 }
 
+export interface TaExhaustionNetPnlInput {
+  readonly depositedUsd: number;
+  readonly currentValueUsd: number;
+  readonly cumulativeFeesClaimedUsd: number;
+  readonly cumulativeRewardsClaimedUsd: number;
+  readonly ageMs: number;
+  /** Paper and live close models debit different real costs. */
+  readonly paperTrading: boolean;
+  readonly swapCostPct?: number | undefined;
+  readonly harvestCostUsd?: number | undefined;
+  readonly conversionCostPct?: number | undefined;
+  readonly txCostUsd?: number | undefined;
+}
+
+/**
+ * Projected realized P&L at close: mark value + claimed fees + rewards − cost
+ * basis − the modeled close costs the settlement path debits. This is the
+ * figure the label and the optional P&L gate read; it is deliberately not a
+ * ledger value (the close measures the real withdrawal). Unknown cost knobs
+ * fall back to the same defaults `resolvePaperExitSettlement` /
+ * `liveCloseCostInput` use.
+ */
+export function taExhaustionNetPnlUsd(input: TaExhaustionNetPnlInput): number {
+  const gross =
+    input.currentValueUsd +
+    input.cumulativeFeesClaimedUsd +
+    input.cumulativeRewardsClaimedUsd -
+    input.depositedUsd;
+  if (!Number.isFinite(gross)) return Number.NaN;
+  return gross - taCloseCostsUsd(input, taAgeDays(input.ageMs));
+}
+
+function taAgeDays(ageMs: number): number {
+  const bounded = Number.isFinite(ageMs) ? ageMs : 0;
+  return Math.max(bounded, 0) / DAY_MS;
+}
+
+function taCloseCostsUsd(input: TaExhaustionNetPnlInput, ageDays: number): number {
+  if (input.paperTrading) {
+    return paperCloseCostsUsd({
+      positionSizeUsd: input.depositedUsd,
+      ageDays,
+      cumulativeGrossFeesUsd: input.cumulativeFeesClaimedUsd,
+      swapCostPct: input.swapCostPct ?? 0.005,
+      harvestCostUsd: input.harvestCostUsd ?? 0.01,
+      conversionCostPct: input.conversionCostPct ?? 0.05,
+      txCostUsd: input.txCostUsd ?? 0.005,
+    });
+  }
+  return liveCloseCostsUsd({
+    positionSizeUsd: input.depositedUsd,
+    ageDays,
+    swapCostPct: input.swapCostPct ?? 0,
+    harvestCostUsd: input.harvestCostUsd ?? 0,
+    txCostUsd: input.txCostUsd ?? 0,
+  });
+}
+
 /** Bracket-tagged EXIT reasoning for ledger slicing. */
-export function taExhaustionReasoning(signals: TaExhaustionSignals): string {
+export function taExhaustionReasoning(signals: TaExhaustionSignals, netPnlUsd: number): string {
   const leg = signals.aboveBbUpper ? "close above BB-upper" : "first-green MACD histogram";
-  return `[ta-exhaustion] RSI(2) ${signals.rsi2.toFixed(1)} > 90 with ${leg} (%B ${signals.percentB.toFixed(2)}, hist ${signals.histogram.toFixed(4)}) — profit-exhaustion, exiting before loss-side gates`;
+  const base = `[ta-exhaustion] RSI(2) ${signals.rsi2.toFixed(1)} > ${signals.rsiThreshold} with ${leg} (%B ${signals.percentB.toFixed(2)}, hist ${signals.histogram.toFixed(4)})`;
+  if (!Number.isFinite(netPnlUsd)) {
+    return `${base} — exhaustion exit (projected P&L unknown), before loss-side gates`;
+  }
+  if (netPnlUsd >= 0) {
+    return `${base} — profit-exhaustion (+$${netPnlUsd.toFixed(2)} net of modeled close costs), exiting before loss-side gates`;
+  }
+  return `${base} — exhaustion exit on a losing position (-$${Math.abs(netPnlUsd).toFixed(2)} net of modeled close costs), exiting before loss-side gates`;
+}
+
+/**
+ * Optional P&L gate: when off (default) every confluence exit passes. When on,
+ * a losing projected P&L is admitted only by a MEASURED fee/IL ratio at or
+ * above the floor; unknown ratios fail closed.
+ */
+export function taExhaustionPnlGateSatisfied(input: {
+  readonly netPnlUsd: number;
+  readonly feeIlRatio: number | null;
+  readonly policy: TaExhaustionPolicy;
+}): boolean {
+  if (!input.policy.requireNonnegativePnl) return true;
+  if (Number.isFinite(input.netPnlUsd) && input.netPnlUsd >= 0) return true;
+  const ratio = input.feeIlRatio;
+  if (ratio === null || !Number.isFinite(ratio)) return false;
+  const floor = Math.max(finiteOr(input.policy.minFeeIlRatio, 0), 0);
+  return ratio >= floor;
 }
 
 export interface TaExhaustionExitInput {
   readonly poolAddress: string;
   readonly positionId: string;
   readonly closes: readonly number[];
+  /** Position age in ms (drives the optional minimum-hold floor). */
+  readonly ageMs: number;
+  /** Projected realized P&L at close, net of modeled close costs. */
+  readonly netPnlUsd: number;
+  /** Measured pool fee/IL ratio; null when the source is modeled/unknown. */
+  readonly feeIlRatio: number | null;
+  readonly policy?: TaExhaustionPolicy | undefined;
 }
 
 /**
  * EXIT vote in `conf1PositionExit` shape (action EXIT, confidence 1.0).
- * Null when cold/junk (fail-open) or without confluence — the caller places
- * it after the TP-ladder branch and before loss-side exits.
+ * Null when disabled, too young, cold/junk (fail-open) or without confluence.
+ * The caller places it after the TP-ladder branch and before loss-side exits.
  */
 export function maybeTaExhaustionExit(input: TaExhaustionExitInput): AgentDecision | null {
-  const signals = taExhaustionSignals(input.closes);
+  const policy = input.policy ?? TA_EXHAUSTION_DEFAULT_POLICY;
+  if (!policy.enabled) return null;
+  const minHoldMs = Math.max(finiteOr(policy.minHoldMs, 0), 0);
+  if (!(input.ageMs >= minHoldMs)) return null;
+  const signals = taExhaustionSignals(input.closes, policy.rsiThreshold);
   if (signals === null) return null;
   if (!isTaExhausted(signals.rsiOverbought, signals.aboveBbUpper, signals.macdFirstGreen)) {
+    return null;
+  }
+  if (
+    !taExhaustionPnlGateSatisfied({
+      netPnlUsd: input.netPnlUsd,
+      feeIlRatio: input.feeIlRatio,
+      policy,
+    })
+  ) {
     return null;
   }
   return {
@@ -229,6 +404,6 @@ export function maybeTaExhaustionExit(input: TaExhaustionExitInput): AgentDecisi
     poolAddress: input.poolAddress,
     positionId: input.positionId,
     confidence: 1,
-    reasoning: taExhaustionReasoning(signals),
+    reasoning: taExhaustionReasoning(signals, input.netPnlUsd),
   };
 }
