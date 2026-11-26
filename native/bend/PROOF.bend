@@ -239,6 +239,44 @@ def L.hard_floor_survives_high_evolution():
 def L.hard_floor_at_exact_boundary():
   {==}
 
+# ── Entry momentum (kernels appended 2026-11-26) ──────────────────────────
+
+def L.momentum_negative_never_credits(m):
+  {==}
+
+def L.momentum_zero_drift_quiet():
+  {==}
+
+def L.momentum_unknown_reference_quiet():
+  {==}
+
+def L.momentum_quarter_reference():
+  {==}
+
+def L.momentum_saturates_at_reference():
+  {==}
+
+def L.momentum_past_reference_saturates():
+  {==}
+
+def L.confidence_static_floor():
+  {==}
+
+def L.confidence_momentum_reaches_floor():
+  {==}
+
+def L.confidence_falling_no_lift():
+  {==}
+
+def L.confidence_ceiling_pin():
+  {==}
+
+def L.confidence_ceiling_holds_with_momentum():
+  {==}
+
+def L.confidence_monotone_in_fee_il():
+  {==}
+
 # Observable: the runaway pins to the ceiling.
 def main() -> Nat:
   K.clamp_thr(1392n, 30n, 300n)

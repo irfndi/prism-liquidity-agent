@@ -20,23 +20,26 @@ computes, so every law below is proved by reflexivity/case analysis.
 
 ## Files
 
-- `kernels.bend` — kernels + `main` demo (prints `300n`: 13.92 pins to 3.0) + fee_known/ta_exhausted gates (ta triple proven) + exit_order precedence gate (1n/2n/3n/0n, per-tick DRY-RUN wired with tp stubbed + real TA vote + stored loss legs) + loss_magnitude_fires (at-or-below floor, per-tick wired; floor arithmetic native because `Nat` is unary) + dust_exit_fires (strictly-below, per-tick wired).
-- `LAWS.bend` — 19 laws, human-owned: band closure (incl. runaway 1392→300),
+- `kernels.bend` — kernels + `main` demo (prints `300n`: 13.92 pins to 3.0) + fee_known/ta_exhausted gates (ta triple proven) + exit_order precedence gate (1n/2n/3n/0n, per-tick DRY-RUN wired with tp stubbed + real TA vote + stored loss legs) + loss_magnitude_fires (at-or-below floor, per-tick wired; floor arithmetic native because `Nat` is unary) + dust_exit_fires (strictly-below, per-tick wired) + momentum_scaled / normal_conf_h (entry momentum credit and the 0.85-capped normal-ENTER confidence).
+- `LAWS.bend` — 68 laws, human-owned: band closure (incl. runaway 1392→300),
   single-nudge ≤20 % (120→144), ceiling/floor pins, modeled fee/IL never
   blocks ENTER / never forces EXIT, capital EXIT confidence-free, paper
   accrual datapi-only, strict drift floor; fee-known passthrough; TA-exhaustion
   triple proven (ta_overbought_fires / ta_single_signal_quiet / ta_cold_start_quiet);
   exit_order kernel-only (unproven, per-tick DRY-RUN wired); loss_magnitude
   and dust kernel-only (unproven, per-tick wired — LAWS triple pending
-  strategy review).
+  strategy review); PnL accounting (like-measured realized PnL, halt arming),
+  dynamic hold, selection/capacity, and entry momentum (negative drift never
+  credits, boost saturates at the weight, confidence floors at 0.50, reaches
+  0.65 on feeIl 2.0 + full momentum, and caps at 0.85).
 - `PROOF.bend` — machine-checked proofs, one `def L.<name>` per law.
 
 ## Checks (bend 2.0.21; CLI is `bend <file>`, there is no `bend check`)
 
 - `bend kernels.bend` → `300n` (green; observable runaway clamp).
-- `bend LAWS.bend` → `Error: 19 TODOs found. The code is incomplete, and not
+- `bend LAWS.bend` → `Error: 68 TODOs found. The code is incomplete, and not
   a valid proof yet.` (by design — open laws; PROOF.bend discharges them).
-- `bend PROOF.bend` → `300n`, no errors (green — all 19 laws proved).
+- `bend PROOF.bend` → `300n`, no errors (green — all 68 laws proved).
 
 ## Scope notes
 

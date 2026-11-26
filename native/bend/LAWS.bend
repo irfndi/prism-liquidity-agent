@@ -234,3 +234,55 @@ law hard_floor_survives_high_evolution:
 
 law hard_floor_at_exact_boundary:
   {K.with_hard_floor(120n, 120n) == 120n : Nat}
+
+# 12. Entry momentum (normal/market lane): the boost is bounded and can only
+# ever help a RISING pool. A falling pool keeps the static confidence — the
+# drift gate rejects it anyway, but nothing here may reward the fall. Units
+# are hundredths, so 0.05 = 5n and 0.65 = 65n.
+
+# A falling pool gets no credit, whatever its magnitude.
+law momentum_negative_never_credits:
+  for m: Nat
+  {K.momentum_scaled(True{}, m, 20n, 5n) == 0n : Nat}
+
+law momentum_zero_drift_quiet:
+  {K.momentum_scaled(False{}, 0n, 20n, 5n) == 0n : Nat}
+
+# Unknown reference (no bin history) contributes zero instead of dividing.
+law momentum_unknown_reference_quiet:
+  {K.momentum_scaled(False{}, 20n, 0n, 5n) == 0n : Nat}
+
+# A quarter of the reference earns a quarter of the weight (0.25 x 0.20 = 0.05).
+law momentum_quarter_reference:
+  {K.momentum_scaled(False{}, 5n, 20n, 20n) == 5n : Nat}
+
+# At and past the reference the boost saturates at the weight, never above it.
+law momentum_saturates_at_reference:
+  {K.momentum_scaled(False{}, 20n, 20n, 5n) == 5n : Nat}
+
+law momentum_past_reference_saturates:
+  {K.momentum_scaled(False{}, 500n, 20n, 5n) == 5n : Nat}
+
+# Static confidence floor: no fees, no momentum -> 0.50.
+law confidence_static_floor:
+  {K.normal_conf_h(0n, False{}, 0n, 20n, 5n) == 50n : Nat}
+
+# feeIl 2.00 adds 0.10 and full momentum adds 0.05 -> 0.65, exactly the floor
+# this feature exists to let a good pool reach.
+law confidence_momentum_reaches_floor:
+  {K.normal_conf_h(200n, False{}, 20n, 20n, 5n) == 65n : Nat}
+
+# The same pool falling keeps the static 0.60: no momentum credit.
+law confidence_falling_no_lift:
+  {K.normal_conf_h(200n, True{}, 40n, 20n, 5n) == 60n : Nat}
+
+# The 0.85 ceiling holds no matter how good the fees get, boost or not.
+law confidence_ceiling_pin:
+  {K.normal_conf_h(1000n, False{}, 0n, 20n, 5n) == 85n : Nat}
+
+law confidence_ceiling_holds_with_momentum:
+  {K.normal_conf_h(2000n, False{}, 20n, 20n, 5n) == 85n : Nat}
+
+# Better fee quality never lowers confidence.
+law confidence_monotone_in_fee_il:
+  {Nat.is_le(K.normal_conf_h(120n, False{}, 0n, 20n, 5n), K.normal_conf_h(240n, False{}, 0n, 20n, 5n)) == True{} : Bool}

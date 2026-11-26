@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# TLA+ verification: the ledger/halt model, and the negative control proving
-# the model still detects the rent regression it was written for.
+# TLA+ verification: the ledger/halt model, the EXIT/HOLD/ROTATE policy model,
+# and the RPC retry/circuit-breaker model — each with the negative control that
+# proves the model still detects the defect it was written for.
 #
 # Standalone (`bun run verify:tla`) and called by scripts/verify.sh.
 set -euo pipefail
@@ -76,3 +77,27 @@ if ! grep -q "Invariant NoEconomicExitOnPositiveCarry is violated" "$WORK/policy
   exit 1
 fi
 echo "ok: buggy policy exits a positive-carry position (the 2026-11 hold-bias defect)"
+
+echo "== TLA+ resilience model (must pass) =="
+(cd "$TLA_DIR" && "${TLC[@]}" -config ResilienceFixed.cfg Resilience.tla > "$WORK/resilience-fixed.log" 2>&1) || {
+  echo "FAIL: resilience model violated an invariant"
+  tail -n 30 "$WORK/resilience-fixed.log"
+  exit 1
+}
+echo "ok: ResilienceFixed retries only transient errors, bounds retries, and never strikes on a business error"
+
+echo "== TLA+ buggy resilience model (must fail) =="
+set +e
+(cd "$TLA_DIR" && "${TLC[@]}" -config ResilienceBuggy.cfg Resilience.tla > "$WORK/resilience-buggy.log" 2>&1)
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: the buggy resilience model passed — a business error opening the breaker is not detected"
+  exit 1
+fi
+if ! grep -q "Invariant BusinessErrorDoesNotOpen is violated" "$WORK/resilience-buggy.log"; then
+  echo "FAIL: the buggy resilience model failed for the wrong reason (exit $rc)"
+  tail -n 30 "$WORK/resilience-buggy.log"
+  exit 1
+fi
+echo "ok: buggy resilience strikes the breaker on a business error (the missing isRetriable defect)"

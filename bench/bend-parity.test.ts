@@ -15,6 +15,8 @@ import {
   clampThreshold,
   nudgeThreshold,
   driftGateRejected,
+  entryMomentumBoost,
+  normalEntryConfidence,
   MIN_FEE_IL_EVOLVED_MIN,
   MIN_FEE_IL_EVOLVED_MAX,
   MAX_FEE_IL_RATIO,
@@ -236,5 +238,44 @@ describeIf("bend parity", () => {
     expect(runBendNat("K.exit_order(True{}, False{}, False{})")).toBe(
       BigInt(tsExitOrder(true, false, false)),
     );
+  });
+
+  // Momentum credit and the normal-ENTER confidence (strategy-service.ts
+  // entryMomentumBoost / normalEntryConfidence). Every vector is an exact
+  // hundredth so the fixed-point mapping has no rounding drift.
+  it("momentum boost is bounded and never credits a falling pool (kernels.bend:momentum_scaled)", () => {
+    for (const [drift, ref, weight] of [
+      [-30, 20, 0.05],
+      [0, 20, 0.05],
+      [5, 20, 0.2],
+      [20, 20, 0.05],
+      [500, 20, 0.05],
+    ] as const) {
+      const ts = entryMomentumBoost(drift, ref, weight);
+      const sign = drift < 0 ? "True{}" : "False{}";
+      expect(
+        runBendNat(`K.momentum_scaled(${sign}, ${Math.abs(drift)}n, ${ref}n, ${toNat(weight)})`),
+      ).toBe(BigInt(Math.round(ts * 100)));
+    }
+  });
+
+  it("normal-ENTER confidence floors, lifts, and caps at 0.85 (kernels.bend:normal_conf_h)", () => {
+    const opts = { referenceBins: 20, confBoost: 0.05 };
+    for (const [feeIl, drift, expected] of [
+      [0, 0, 50],
+      [2, 20, 65],
+      [2, -40, 60],
+      [10, 0, 85],
+      [20_000, 20, 85],
+      [1.2, 0, 56],
+      [2.4, 0, 62],
+    ] as const) {
+      const ts = normalEntryConfidence(feeIl, drift, opts);
+      const sign = drift < 0 ? "True{}" : "False{}";
+      expect(
+        runBendNat(`K.normal_conf_h(${toNat(feeIl)}, ${sign}, ${Math.abs(drift)}n, 20n, 5n)`),
+      ).toBe(BigInt(expected));
+      expect(Math.round(ts * 100)).toBe(expected);
+    }
   });
 });

@@ -271,6 +271,37 @@ def maturity_gate_s(+measured_s: Nat, +fallback_s: Nat, nonzero: Bool) -> Nat:
 def maturity_gate_capped_s(+measured_s: Nat, +cap_s: Nat) -> Nat:
   Nat.min(measured_s, cap_s)
 
+# ── Entry momentum (normal / market lane) ────────────────────────────────
+# Ported from engine/strategy-service.ts `entryMomentumBoost` and
+# `normalEntryConfidence`. Confidence and weight are hundredths (0.05 = 5n);
+# fee/IL is hundredths (2.00 = 200n); drift and its reference are whole bins.
+#
+# Why it exists: the drift gate rejects a falling pool, but a rising one used
+# to enter on the SAME static confidence as a flat one, so momentum never
+# reached the score or the confidence floor. The boost is deliberately bounded
+# — unbounded momentum credit would let a single spike clear the ENTER floor.
+#
+# `neg` carries the drift sign (Bend's Nat cannot hold it). A negative drift
+# contributes ZERO: there is no credit for falling prices. `ref = 0` is the
+# unknown-reference case, which contributes zero rather than dividing.
+def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_h: Nat) -> Nat:
+  match neg:
+    case True{}:
+      0n
+    case False{}:
+      match ref:
+        case 0n:
+          0n
+        case 1n+p:
+          Nat.div(Nat.mul(Nat.min(drift, 1n+p), weight_h), 1n+p)
+
+# normalEntryConfidence: min(0.50 + feeIlRatio x 0.05 + momentum, 0.85).
+def normal_conf_h(+fee_il_100: Nat, neg: Bool, +drift: Nat, +ref: Nat, +weight_h: Nat) -> Nat:
+  Nat.min(
+    Nat.add(Nat.add(50n, Nat.div(fee_il_100, 20n)), momentum_scaled(neg, drift, ref, weight_h)),
+    85n,
+  )
+
 # Evolution may move a threshold, but a hard safety floor still bounds it:
 # `evolveThresholds` clamps to the band, then the safety floor applies.
 def with_hard_floor(+evolved: Nat, +hard_floor: Nat) -> Nat:
