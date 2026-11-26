@@ -193,6 +193,38 @@ law capacity_bounded_by_max_pools:
 law capacity_never_exceeds_universe:
   {K.active_count(7n, 40n, 80n) == 7n : Nat}
 
+# 10b. Dynamic hold: break-even time is cost x age / fees, so a faster fee
+# rate can only shorten it and a bigger round trip can only lengthen it.
+law hold_break_even_exact:
+  {K.break_even_hold_h(500n, 4n, 25n) == 80n : Nat}
+
+law hold_zero_cost_is_immediate:
+  {K.break_even_hold_h(0n, 4n, 25n) == 0n : Nat}
+
+law hold_faster_fees_shorter:
+  {Nat.is_le(K.break_even_hold_h(500n, 4n, 50n), K.break_even_hold_h(500n, 4n, 25n)) == True{} : Bool}
+
+law hold_bigger_cost_longer:
+  {Nat.is_le(K.break_even_hold_h(2500n, 4n, 100n), K.break_even_hold_h(500n, 4n, 100n)) == False{} : Bool}
+
+# The measured hold is used as-is when known — a cap would re-impose the fixed
+# gate this policy removes (a 40% APR pool needs ~11 days; capping at 24h was
+# the original bug moved from 12h to 24h).
+law maturity_uses_measured_hold:
+  {K.maturity_gate_s(1n, 12n, True{}) == 1n : Nat}
+
+law maturity_uses_measured_hold_even_when_long:
+  {K.maturity_gate_s(264n, 12n, True{}) == 264n : Nat}
+
+law maturity_falls_back_when_unknown:
+  {K.maturity_gate_s(0n, 12n, False{}) == 12n : Nat}
+
+law maturity_explicit_cap_applies_only_when_asked:
+  {K.maturity_gate_capped_s(264n, 24n) == 24n : Nat}
+
+law maturity_explicit_cap_is_a_floor_when_under:
+  {K.maturity_gate_capped_s(1n, 24n) == 1n : Nat}
+
 # 11. Evolution: a hard safety floor survives any evolved threshold.
 law hard_floor_survives_low_evolution:
   {K.with_hard_floor(10n, 120n) == 120n : Nat}

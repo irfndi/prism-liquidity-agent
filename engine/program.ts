@@ -229,6 +229,7 @@ import type {
 } from "./agent-transport.js";
 import { randomUUID } from "crypto";
 import { AgentLive, AgentNoOp } from "./agent-service.js";
+import { resolveExitMaturityMs } from "./hold-policy.js";
 import { createLogger } from "./logger.js";
 import {
   isInsufficientTokenBalanceError,
@@ -11440,12 +11441,28 @@ export const program = Effect.gen(function* () {
 
       // Fee/IL EXIT (immature positions exempt — the ratio is near-zero before
       // fees accrue): hold-bias suppresses in-range wobbles above -10%.
+      // Dynamic maturity: the fixed age gate replaced by THIS position's
+      // realized fee rate (engine/hold-policy.ts).
+      function economicExitMature(pos: PositionRecord): boolean {
+        return (
+          Date.now() - pos.timestamp >=
+          resolveExitMaturityMs({
+            ageMs: Math.max(Date.now() - pos.timestamp, 0),
+            accruedFeesUsd: pos.cumulativeFeesClaimedUsd,
+            roundTripCostUsd: liveCloseCostsUsd({
+              positionSizeUsd: pos.depositedUsd,
+              ageDays: Math.max(Date.now() - pos.timestamp, 0) / DAY_MS,
+              swapCostPct: config.runnerSwapCostPct ?? 0,
+              harvestCostUsd: config.feeCaptureHarvestCostUsd ?? 0,
+              txCostUsd: config.harvestTxCostUsdEst ?? 0,
+            }),
+            fallbackMs: config.minYieldExitAgeMs ?? 43_200_000,
+          })
+        );
+      }
+
       function checkFeeIlExit(pos: PositionRecord): Effect.Effect<AgentDecision | null, Error> {
-        if (
-          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 43_200_000) &&
-          metrics.feeIlRatioKnown &&
-          feeIlRatio < 0.5
-        ) {
+        if (economicExitMature(pos) && metrics.feeIlRatioKnown && feeIlRatio < 0.5) {
           // feeIlRatioUnknown (heuristic) → skip: a fabricated-low ratio must
           // not force an exit.
           if (
@@ -11487,8 +11504,7 @@ export const program = Effect.gen(function* () {
       function checkYieldRegressionExit(
         pos: PositionRecord,
       ): Effect.Effect<AgentDecision | null, Error> {
-        const yieldWindowMature =
-          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 43_200_000);
+        const yieldWindowMature = economicExitMature(pos);
         if (
           !(
             yieldWindowMature &&

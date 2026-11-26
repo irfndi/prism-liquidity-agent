@@ -178,6 +178,35 @@ def L.entry_overhead_is_the_gap():
 def L.entry_overhead_never_negative():
   {==}
 
+# ── Dynamic hold (kernels appended 2026-11-26) ────────────────────────────
+
+def L.hold_break_even_exact():
+  {==}
+
+def L.hold_zero_cost_is_immediate():
+  {==}
+
+def L.hold_faster_fees_shorter():
+  {==}
+
+def L.hold_bigger_cost_longer():
+  {==}
+
+def L.maturity_uses_measured_hold():
+  {==}
+
+def L.maturity_uses_measured_hold_even_when_long():
+  {==}
+
+def L.maturity_falls_back_when_unknown():
+  {==}
+
+def L.maturity_explicit_cap_applies_only_when_asked():
+  {==}
+
+def L.maturity_explicit_cap_is_a_floor_when_under():
+  {==}
+
 # ── Selection + evolution (kernels appended 2026-11-26) ───────────────────
 
 def L.floor_inclusive_at_boundary():
