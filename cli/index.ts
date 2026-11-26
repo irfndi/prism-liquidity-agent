@@ -23,6 +23,7 @@ import { resumeCommand } from "./resume.js";
 import { telemetryCommand } from "./telemetry.js";
 import { configCommand } from "./config.js";
 import { forensicsCommand } from "./forensics.js";
+import { registerPnlAuditCommand } from "./pnl-audit.js";
 import { getCurrentVersion } from "../engine/version.js";
 
 const program = new Command();
@@ -56,5 +57,6 @@ program.addCommand(resumeCommand);
 program.addCommand(telemetryCommand);
 program.addCommand(configCommand);
 program.addCommand(forensicsCommand);
+registerPnlAuditCommand(program);
 
 await program.parseAsync();
