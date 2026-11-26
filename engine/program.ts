@@ -2972,6 +2972,8 @@ interface LivePositionInput {
   readonly entryDipOffsetBins?: number | undefined;
   readonly signalTimestamp?: number | undefined;
   readonly signalSnapshotId?: number | undefined;
+  /** Measured cash spent beyond the deposit (rent + fee + wrap). */
+  readonly entryOverheadUsd?: number | null | undefined;
 }
 
 /** Build the live ENTER PositionRecord from the adapter's executed deposit. */
@@ -3012,6 +3014,7 @@ function makeLivePositionRecord(input: LivePositionInput): PositionRecord {
     launchRunner: dipEntry ? true : null,
     launchRunnerSteps: dipEntry ? 0 : null,
     launchRunnerAnchorPrice: dipEntry ? pool.currentPrice : null,
+    entryOverheadUsd: input.entryOverheadUsd,
   };
 }
 
@@ -3167,6 +3170,7 @@ function executeLiveEnterPosition(
       entryDipOffsetBins,
       signalTimestamp,
       signalSnapshotId,
+      entryOverheadUsd: enterResult.result.entryOverheadUsd ?? null,
     });
     deps.trackedPositions.set(pos.positionId, pos);
     yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
@@ -3189,6 +3193,7 @@ function executeLiveEnterPosition(
           txSignature: enterResult.result.txSignature,
           depositMode: enterResult.result.depositMode,
           strategySpec: entryStrategySpec,
+          entryOverheadUsd: pos.entryOverheadUsd ?? null,
         },
         createdAt: Date.now(),
       })
@@ -3268,26 +3273,30 @@ function runLiveExitPosition(
   never
 > {
   return Effect.gen(function* () {
-    const exitResult = yield* deps.adapter.exitPosition(decision.poolAddress, positionPubKey).pipe(
-      Effect.tap(() =>
-        Effect.sync(() =>
-          console.info("Live position exited", {
-            pool: decision.poolAddress,
-            position: pos.positionPubKey,
-          }),
+    const exitResult = yield* deps.adapter
+      .exitPosition(decision.poolAddress, positionPubKey, {
+        entryOverheadUsd: pos.entryOverheadUsd ?? undefined,
+      })
+      .pipe(
+        Effect.tap(() =>
+          Effect.sync(() =>
+            console.info("Live position exited", {
+              pool: decision.poolAddress,
+              position: pos.positionPubKey,
+            }),
+          ),
         ),
-      ),
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
-      Effect.catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("Live EXIT failed", {
-          pool: decision.poolAddress,
-          err: msg,
-        });
-        return Effect.succeed({ result: null, error: msg });
-      }),
-    );
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+        Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
+        Effect.catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Live EXIT failed", {
+            pool: decision.poolAddress,
+            err: msg,
+          });
+          return Effect.succeed({ result: null, error: msg });
+        }),
+      );
     const exited = exitResult.result !== null;
     const exitError = exitResult.error;
     const exitResultData = exitResult.result;
@@ -3908,10 +3917,19 @@ function buildExitMetadata(
   exitReason?: string,
 ) {
   const reason = exitReasonField(exitReason);
-  if (!pricingUnresolved) return { realizedPnlUsd, modeledCostsUsd, ...reason };
+  // Cost-basis provenance: the gross measured withdrawal and the entry
+  // overhead subtracted from it, so an audit can recompute realized PnL
+  // without re-reading the chain either way.
+  const basis = {
+    grossWithdrawnUsd: exitResultData?.grossWithdrawnUsd ?? null,
+    entryOverheadUsd: exitResultData?.entryOverheadUsd ?? 0,
+  };
+  if (!pricingUnresolved) return { realizedPnlUsd, modeledCostsUsd, ...basis, ...reason };
+
   return {
     realizedPnlUsd,
     modeledCostsUsd,
+    ...basis,
     pricing: "unresolved",
     lastMarkUsd: currentValueUsd,
     ...reason,
