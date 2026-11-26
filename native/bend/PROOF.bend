@@ -376,6 +376,12 @@ def L.momentum_quarter_reference():
 def L.momentum_sub_unit_kept():
   {==}
 
+def L.momentum_rounds_half_up():
+  {==}
+
+def L.momentum_rounds_down_below_half():
+  {==}
+
 def L.momentum_saturates_at_reference():
   {==}
 
@@ -389,6 +395,9 @@ def L.confidence_momentum_reaches_floor():
   {==}
 
 def L.confidence_sub_unit_momentum():
+  {==}
+
+def L.confidence_rounds_half_up():
   {==}
 
 def L.confidence_falling_no_lift():

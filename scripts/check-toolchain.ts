@@ -155,7 +155,9 @@ for (const tag of new Set([...dockerfile.matchAll(/FROM oven\/bun:([\w.-]+)/g)].
 const workflowDir = join(root, ".github/workflows");
 for (const file of readdirSync(workflowDir).filter((entry) => entry.endsWith(".yml"))) {
   const text = readFileSync(join(workflowDir, file), "utf8");
-  for (const match of text.matchAll(/^\s*BUN_VERSION:\s*([\w.]+)\s*$/gm)) {
+  // Quoted and unquoted YAML values are both valid; an unquoted-only pattern
+  // would silently skip `BUN_VERSION: "1.4.4"` and report success.
+  for (const match of text.matchAll(/^\s*BUN_VERSION:\s*["']?([\w.]+)["']?\s*$/gm)) {
     check(
       `.github/workflows/${file}`,
       `workflow pins BUN_VERSION ${match[1] ?? "(empty)"} but packageManager pins bun@${managerVersion ?? "(unset)"}.`,

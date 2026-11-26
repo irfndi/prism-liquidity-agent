@@ -451,6 +451,8 @@ describeIf("bend parity", () => {
     for (const [drift, ref, weight] of [
       [-30, 20, 0.05],
       [0, 20, 0.05],
+      [1, 20, 0.05],
+      [1, 20, 0.1],
       [2, 20, 0.05],
       [5, 20, 0.2],
       [20, 20, 0.05],
@@ -470,9 +472,14 @@ describeIf("bend parity", () => {
       [0, 0],
       [2, 20],
       [2, -40],
+      [1.2, 1],
       [1.2, 2],
+      [1.25, 0],
       [10, 0],
-      [20_000, 20],
+      // Absurd fees for the ceiling pin. Keep the magnitude small: Bend's Nat is
+      // unary, and `toMilli(20_000)` is a 20-million-successor literal that times
+      // the prover out without testing anything the 40x case does not.
+      [40, 20],
       [1.2, 0],
       [2.4, 0],
     ] as const) {

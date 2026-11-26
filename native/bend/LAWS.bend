@@ -381,6 +381,14 @@ law momentum_quarter_reference:
 law momentum_sub_unit_kept:
   {K.momentum_scaled(False{}, 2n, 20n, 50n) == 5n : Nat}
 
+# The smallest real momentum rounds UP: 1/20 x 0.05 = 0.0025, and the TS
+# helper rounds to 0.003. Flooring returned 0.002 and broke parity here.
+law momentum_rounds_half_up:
+  {K.momentum_scaled(False{}, 1n, 20n, 50n) == 3n : Nat}
+
+law momentum_rounds_down_below_half:
+  {K.momentum_scaled(False{}, 1n, 20n, 10n) == 1n : Nat}
+
 # At and past the reference the boost saturates at the weight, never above it.
 law momentum_saturates_at_reference:
   {K.momentum_scaled(False{}, 20n, 20n, 50n) == 50n : Nat}
@@ -400,6 +408,10 @@ law confidence_momentum_reaches_floor:
 # The parity vector from the TS source: feeIl 1.20, +2 bins of drift -> 0.565.
 law confidence_sub_unit_momentum:
   {K.normal_conf_milli(1200n, False{}, 2n, 20n, 50n) == 565n : Nat}
+
+# The same pool one bin into the trend: 0.5625 rounds to 0.563, not 0.562.
+law confidence_rounds_half_up:
+  {K.normal_conf_milli(1200n, False{}, 1n, 20n, 50n) == 563n : Nat}
 
 # The same pool falling keeps the static 0.560: no momentum credit.
 law confidence_falling_no_lift:

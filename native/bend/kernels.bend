@@ -394,6 +394,14 @@ def maturity_gate_capped_s(+measured_s: Nat, +cap_s: Nat) -> Nat:
 # `neg` carries the drift sign (Bend's Nat cannot hold it). A negative drift
 # contributes ZERO: there is no credit for falling prices. `ref = 0` is the
 # unknown-reference case, which contributes zero rather than dividing.
+#
+# The division ROUNDS to nearest, not down: `drift x weight / ref` at 1 x 50 / 20
+# is 0.0025 and TS rounds it to 3 thousandths, while flooring said 2. Both the
+# +1-bin and the +2-bin cases sit on this boundary, so flooring silently broke
+# parity on the smallest momentum the gate will ever see.
+def round_div(+num: Nat, +den: Nat) -> Nat:
+  Nat.div(Nat.add(num, Nat.div(den, 2n)), den)
+
 def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
   match neg:
     case True{}:
@@ -403,14 +411,15 @@ def momentum_scaled(neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Na
         case 0n:
           0n
         case 1n+p:
-          Nat.div(Nat.mul(Nat.min(drift, 1n+p), weight_milli), 1n+p)
+          round_div(Nat.mul(Nat.min(drift, 1n+p), weight_milli), 1n+p)
 
 # normalEntryConfidence: min(0.500 + feeIlRatio x 0.05 + momentum, 0.850),
-# in thousandths. feeIl x 0.05 is `fee_il_milli / 20` (1200 / 20 = 60 = 0.060).
+# in thousandths. feeIl x 0.05 is `fee_il_milli / 20` (1200 / 20 = 60 = 0.060),
+# rounded the same way: 1.25 x 0.05 = 62.5 thousandths, and TS rounds to 63.
 def normal_conf_milli(+fee_il_milli: Nat, neg: Bool, +drift: Nat, +ref: Nat, +weight_milli: Nat) -> Nat:
   Nat.min(
     Nat.add(
-      Nat.add(500n, Nat.div(fee_il_milli, 20n)),
+      Nat.add(500n, round_div(fee_il_milli, 20n)),
       momentum_scaled(neg, drift, ref, weight_milli),
     ),
     850n,

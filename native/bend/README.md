@@ -20,8 +20,8 @@ computes, so every law below is proved by reflexivity/case analysis.
 
 ## Files
 
-- `kernels.bend` — kernels + `main` demo (prints `300n`: 13.92 pins to 3.0) + fee_known/ta_exhausted gates (ta triple proven) + the TA-exhaustion projected-P&L/label/gate/hold/vote policy from #237 + selection/capacity + dynamic-hold/maturity + evolution hard-floor kernels + momentum_scaled / normal_conf_h (entry momentum credit and the 0.85-capped normal-ENTER confidence) + exit_order precedence gate (1n/2n/3n/0n, per-tick DRY-RUN wired with tp stubbed + real TA vote + stored loss legs) + loss_magnitude_fires (at-or-below floor, per-tick wired; floor arithmetic native because `Nat` is unary) + dust_exit_fires (strictly-below, per-tick wired).
-- `LAWS.bend` — 104 laws, human-owned: band closure (incl. runaway 1392→300),
+- `kernels.bend` — kernels + `main` demo (prints `300n`: 13.92 pins to 3.0) + fee_known/ta_exhausted gates (ta triple proven) + the TA-exhaustion projected-P&L/label/gate/hold/vote policy from #237 + selection/capacity + dynamic-hold/maturity + evolution hard-floor kernels + momentum_scaled / normal_conf_milli (entry momentum credit and the 0.85-capped normal-ENTER confidence, in thousandths with round-half-up division) + exit_order precedence gate (1n/2n/3n/0n, per-tick DRY-RUN wired with tp stubbed + real TA vote + stored loss legs) + loss_magnitude_fires (at-or-below floor, per-tick wired; floor arithmetic native because `Nat` is unary) + dust_exit_fires (strictly-below, per-tick wired).
+- `LAWS.bend` — 107 laws, human-owned: band closure (incl. runaway 1392→300),
   single-nudge ≤20 % (120→144), ceiling/floor pins, modeled fee/IL never
   blocks ENTER / never forces EXIT, capital EXIT confidence-free, paper
   accrual datapi-only, strict drift floor; fee-known passthrough; TA-exhaustion
@@ -39,9 +39,9 @@ computes, so every law below is proved by reflexivity/case analysis.
 ## Checks (bend 2.0.21; CLI is `bend <file>`, there is no `bend check`)
 
 - `bend kernels.bend` → `300n` (green; observable runaway clamp).
-- `bend LAWS.bend` → `Error: 104 TODOs found. The code is incomplete, and not
+- `bend LAWS.bend` → `Error: 107 TODOs found. The code is incomplete, and not
   a valid proof yet.` (by design — open laws; PROOF.bend discharges them).
-- `bend PROOF.bend` → `300n`, no errors (green — all 104 laws proved).
+- `bend PROOF.bend` → `300n`, no errors (green — all 107 laws proved).
 
 ## Scope notes
 
