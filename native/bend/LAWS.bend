@@ -282,3 +282,72 @@ law ta_vote_confluence_quiet:
 
 law ta_vote_pnl_gate_quiet:
   {K.ta_vote(True{}, True{}, True{}, False{}) == False{} : Bool}
+# 10. Selection: an admission floor is inclusive at the boundary and strict
+# below it, and RELAXING a floor can never un-admit a pool that qualified.
+# (2026-11-26: absolute fees/volume floors of $3,000/$1M admitted 2 of 3,000
+# pools; the same gate at $300/$250k admits 43. The door, not the engine.)
+law floor_inclusive_at_boundary:
+  {K.pool_admitted(5000n, 5000n) == True{} : Bool}
+
+law floor_rejects_below:
+  {K.pool_admitted(4999n, 5000n) == False{} : Bool}
+
+law relaxed_floor_keeps_admitted_pool:
+  {K.pool_admitted(6000n, 300n) == True{} : Bool}
+
+law tightened_floor_drops_pool:
+  {K.pool_admitted(6000n, 7000n) == False{} : Bool}
+
+# 11. Capacity: the active scan set is bounded by TOP_K and MAX_POOLS no
+# matter how many pools rank. A rising universe must not silently widen the
+# cycle into an RPC bill.
+law capacity_bounded_by_top_k:
+  {K.active_count(500n, 40n, 80n) == 40n : Nat}
+
+law capacity_bounded_by_max_pools:
+  {K.active_count(500n, 100n, 80n) == 80n : Nat}
+
+law capacity_never_exceeds_universe:
+  {K.active_count(7n, 40n, 80n) == 7n : Nat}
+
+# 11b. Dynamic hold: break-even time is cost x age / fees, so a faster fee
+# rate can only shorten it and a bigger round trip can only lengthen it.
+law hold_break_even_exact:
+  {K.break_even_hold_h(500n, 4n, 25n) == 80n : Nat}
+
+law hold_zero_cost_is_immediate:
+  {K.break_even_hold_h(0n, 4n, 25n) == 0n : Nat}
+
+law hold_faster_fees_shorter:
+  {Nat.is_le(K.break_even_hold_h(500n, 4n, 50n), K.break_even_hold_h(500n, 4n, 25n)) == True{} : Bool}
+
+law hold_bigger_cost_longer:
+  {Nat.is_le(K.break_even_hold_h(2500n, 4n, 100n), K.break_even_hold_h(500n, 4n, 100n)) == False{} : Bool}
+
+# The measured hold is used as-is when known — a cap would re-impose the fixed
+# gate this policy removes (a 40% APR pool needs ~11 days; capping at 24h was
+# the original bug moved from 12h to 24h).
+law maturity_uses_measured_hold:
+  {K.maturity_gate_s(1n, 12n, True{}) == 1n : Nat}
+
+law maturity_uses_measured_hold_even_when_long:
+  {K.maturity_gate_s(264n, 12n, True{}) == 264n : Nat}
+
+law maturity_falls_back_when_unknown:
+  {K.maturity_gate_s(0n, 12n, False{}) == 12n : Nat}
+
+law maturity_explicit_cap_applies_only_when_asked:
+  {K.maturity_gate_capped_s(264n, 24n) == 24n : Nat}
+
+law maturity_explicit_cap_is_a_floor_when_under:
+  {K.maturity_gate_capped_s(1n, 24n) == 1n : Nat}
+
+# 12. Evolution: a hard safety floor survives any evolved threshold.
+law hard_floor_survives_low_evolution:
+  {K.with_hard_floor(10n, 120n) == 120n : Nat}
+
+law hard_floor_survives_high_evolution:
+  {K.with_hard_floor(500n, 120n) == 500n : Nat}
+
+law hard_floor_at_exact_boundary:
+  {K.with_hard_floor(120n, 120n) == 120n : Nat}

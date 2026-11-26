@@ -38,21 +38,45 @@ echo "== TLA+ fixed model (must pass) =="
 }
 echo "ok: LedgerFixed holds every invariant and the halt arms"
 
-echo "== TLA+ buggy model (must fail) =="
+echo "== TLA+ buggy ledger model (must fail) =="
 set +e
 (cd "$TLA_DIR" && "${TLC[@]}" -config LedgerBuggy.cfg Ledger.tla > "$WORK/tlc-buggy.log" 2>&1)
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then
-  echo "FAIL: the buggy model passed — the model cannot detect the regression it was written for"
+  echo "FAIL: the buggy ledger model passed — the model cannot detect the regression it was written for"
   exit 1
 fi
 if ! grep -q "Invariant LedgerMatchesTruePnl is violated" "$WORK/tlc-buggy.log"; then
-  echo "FAIL: the buggy model failed for the wrong reason (exit $rc)"
+  echo "FAIL: the buggy ledger model failed for the wrong reason (exit $rc)"
   tail -n 30 "$WORK/tlc-buggy.log"
   exit 1
 fi
-echo "ok: buggy model violates LedgerMatchesTruePnl (the 2026-11 incident, model-checked)"
+echo "ok: buggy ledger violates LedgerMatchesTruePnl (the 2026-11 incident, model-checked)"
+
+echo "== TLA+ policy model (must pass) =="
+(cd "$TLA_DIR" && "${TLC[@]}" -config PolicyFixed.cfg Policy.tla > "$WORK/policy-fixed.log" 2>&1) || {
+  echo "FAIL: policy model violated an invariant"
+  tail -n 30 "$WORK/policy-fixed.log"
+  exit 1
+}
+echo "ok: PolicyFixed holds safety precedence, no positive-carry exit, rotation gating"
+
+echo "== TLA+ buggy policy model (must fail) =="
+set +e
+(cd "$TLA_DIR" && "${TLC[@]}" -config PolicyBuggy.cfg Policy.tla > "$WORK/policy-buggy.log" 2>&1)
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: the buggy policy model passed — hold-bias regression is not detected"
+  exit 1
+fi
+if ! grep -q "Invariant NoEconomicExitOnPositiveCarry is violated" "$WORK/policy-buggy.log"; then
+  echo "FAIL: the buggy policy model failed for the wrong reason (exit $rc)"
+  tail -n 30 "$WORK/policy-buggy.log"
+  exit 1
+fi
+echo "ok: buggy policy exits a positive-carry position (the 2026-11 hold-bias defect)"
 
 # ── TA-exhaustion gate (#237) ───────────────────────────────────────────────
 run_ta_pass() {

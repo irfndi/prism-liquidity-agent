@@ -12,6 +12,12 @@ import { assessRunnerPool } from "./runner-preset.js";
 import type { DiscoveredPool } from "./services.js";
 import { stableDailyFeesUsd } from "./fee-capture.js";
 import { transferFeeRejectionReason } from "./transfer-fee.js";
+import {
+  RUNNER_PRESET_DEFAULTS,
+  RUNNER_PRESET_MAX_EFFECTIVE_FEE_RATE,
+  RUNNER_PRESET_MIN_BIN_STEP,
+  RUNNER_PRESET_MIN_FEE_TVL_30M_PCT,
+} from "./runner-preset.js";
 
 export interface MarketGateConfig {
   readonly minTvlUsd: number;
@@ -490,4 +496,82 @@ export function gateAndRankMarketPools(
 
   ranked.sort((a, b) => b.score - a.score);
   return { ranked, rejected };
+}
+
+/** The config fields the market gate reads (AppConfig satisfies this). */
+export interface MarketScanConfigSource {
+  readonly marketScanMinTvlUsd?: number | undefined;
+  readonly marketScanMinFeeApr?: number | undefined;
+  readonly marketScanMajorMinFeeApr?: number | undefined;
+  readonly marketScanMinFees24hUsd?: number | undefined;
+  readonly marketScanMinVolume24hUsd?: number | undefined;
+  readonly marketScanMinHolders?: number | undefined;
+  readonly marketScanMinPoolAgeHours?: number | undefined;
+  readonly marketScanMinBinStep?: number | undefined;
+  readonly marketScanMaxBinStep?: number | undefined;
+  readonly stablecoinMints?: ReadonlySet<string> | undefined;
+  readonly runnerPresetEnabled?: boolean | undefined;
+}
+
+/**
+ * AppConfig -> MarketGateConfig. Lives here (not in program.ts) so the
+ * on-demand diagnostic (`prism scan-diag`) builds the SAME gate the scan loop
+ * runs — a diagnostic that drifts from production is worse than none.
+ */
+export function resolveMarketScanConfig(
+  config: MarketScanConfigSource,
+): Omit<MarketGateConfig, "minVolumeTurnover" | "maxVolumeTurnover"> {
+  return {
+    minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
+    minFeeApr: config.marketScanMinFeeApr ?? 25,
+    majorMinFeeApr: config.marketScanMajorMinFeeApr ?? 200,
+    minFees24hUsd: config.marketScanMinFees24hUsd,
+    minVolume24hUsd: config.marketScanMinVolume24hUsd,
+    minHolders: config.marketScanMinHolders ?? 1000,
+    minPoolAgeHours: config.marketScanMinPoolAgeHours ?? 24,
+    minBinStep: config.marketScanMinBinStep ?? 2,
+    maxBinStep: config.marketScanMaxBinStep ?? 200,
+    stablecoinMints: config.stablecoinMints ?? new Set<string>(),
+    ...(config.runnerPresetEnabled === true
+      ? {
+          runnerPreset: {
+            minFeeTvl30mPct: RUNNER_PRESET_MIN_FEE_TVL_30M_PCT,
+            minBinStep: RUNNER_PRESET_MIN_BIN_STEP,
+            maxEffectiveFeeRate: RUNNER_PRESET_MAX_EFFECTIVE_FEE_RATE,
+            minTurnover: RUNNER_PRESET_DEFAULTS.minTurnover,
+          },
+        }
+      : undefined),
+  };
+}
+
+/** Coarse rejection bucket from a gate reason ("tvl 4.9e-9 < 5000" -> "tvl"). */
+export function rejectionCategory(reason: string): string {
+  const head = reason.split(" ", 1)[0] ?? reason;
+  return head.replace(/:$/, "");
+}
+
+export interface RejectionSummaryEntry {
+  readonly category: string;
+  readonly count: number;
+  readonly example: string;
+}
+
+/** Histogram of gate rejections, largest bucket first (diagnostic only). */
+export function summarizeRejections(
+  rejected: ReadonlyArray<{ readonly address: string; readonly reason: string }>,
+): ReadonlyArray<RejectionSummaryEntry> {
+  const buckets = new Map<string, { count: number; example: string }>();
+  for (const entry of rejected) {
+    const category = rejectionCategory(entry.reason);
+    const bucket = buckets.get(category);
+    if (bucket === undefined) {
+      buckets.set(category, { count: 1, example: entry.reason });
+      continue;
+    }
+    bucket.count += 1;
+  }
+  return [...buckets.entries()]
+    .map(([category, bucket]) => ({ category, count: bucket.count, example: bucket.example }))
+    .sort((a, b) => b.count - a.count);
 }

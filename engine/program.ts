@@ -80,6 +80,8 @@ import {
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import {
   gateAndRankMarketPools,
+  resolveMarketScanConfig,
+  summarizeRejections,
   mintAuthorityRejectReason,
   type MarketPoolRank,
 } from "./market-gate.js";
@@ -233,6 +235,7 @@ import type {
 } from "./agent-transport.js";
 import { randomUUID } from "crypto";
 import { AgentLive, AgentNoOp } from "./agent-service.js";
+import { resolveExitMaturityMs } from "./hold-policy.js";
 import { createLogger } from "./logger.js";
 import {
   isInsufficientTokenBalanceError,
@@ -4277,32 +4280,6 @@ function buildKillSwitchCooldown(
 }
 
 /** Market-scan gate config with operator defaults. */
-function resolveMarketScanConfig(config: AppConfig) {
-  return {
-    minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
-    minFeeApr: config.marketScanMinFeeApr ?? 25,
-    majorMinFeeApr: config.marketScanMajorMinFeeApr ?? 200,
-    minFees24hUsd: config.marketScanMinFees24hUsd,
-    minVolume24hUsd: config.marketScanMinVolume24hUsd,
-    minHolders: config.marketScanMinHolders ?? 1000,
-    minPoolAgeHours: config.marketScanMinPoolAgeHours ?? 24,
-    minBinStep: config.marketScanMinBinStep ?? 2,
-    maxBinStep: config.marketScanMaxBinStep ?? 200,
-    stablecoinMints: config.stablecoinMints ?? new Set<string>(),
-    // Opt-in: without RUNNER_PRESET_ENABLED the gate is absent and selection
-    // is byte-identical to before this feature.
-    ...(config.runnerPresetEnabled === true
-      ? {
-          runnerPreset: {
-            minFeeTvl30mPct: RUNNER_PRESET_MIN_FEE_TVL_30M_PCT,
-            minBinStep: RUNNER_PRESET_MIN_BIN_STEP,
-            maxEffectiveFeeRate: RUNNER_PRESET_MAX_EFFECTIVE_FEE_RATE,
-            minTurnover: RUNNER_PRESET_DEFAULTS.minTurnover,
-          },
-        }
-      : undefined),
-  };
-}
 
 /** Active market-scan set size (top-K bounded by the max pool cap). */
 function resolveMarketActiveCount(config: AppConfig): number {
@@ -8367,7 +8344,7 @@ export const program = Effect.gen(function* () {
         return;
       }
       const marketCfg = resolveMarketScanConfig(config);
-      const { ranked } = gateAndRankMarketPools(discovered, {
+      const { ranked, rejected } = gateAndRankMarketPools(discovered, {
         ...marketCfg,
         minVolumeTurnover: 0.02,
         maxVolumeTurnover: 50,
@@ -8381,6 +8358,12 @@ export const program = Effect.gen(function* () {
       logger.info("Market scan: universe gate refreshed", {
         universe: discovered.length,
         passed: ranked.length,
+        // WHY nothing passed: the gate is the door to every lane, so a 0/N
+        // refresh must say WHICH filter closed it (parity with the launch
+        // radar, which has always logged its rejection buckets).
+        rejections: summarizeRejections(rejected)
+          .slice(0, 8)
+          .map((r) => `${r.category}: ${r.count} — ${r.example.slice(0, 70)}`),
         active: marketScanPools.size,
         top: ranked
           .slice(0, 5)
@@ -11577,12 +11560,28 @@ export const program = Effect.gen(function* () {
 
       // Fee/IL EXIT (immature positions exempt — the ratio is near-zero before
       // fees accrue): hold-bias suppresses in-range wobbles above -10%.
+      // Dynamic maturity: the fixed age gate replaced by THIS position's
+      // realized fee rate (engine/hold-policy.ts).
+      function economicExitMature(pos: PositionRecord): boolean {
+        return (
+          Date.now() - pos.timestamp >=
+          resolveExitMaturityMs({
+            ageMs: Math.max(Date.now() - pos.timestamp, 0),
+            accruedFeesUsd: pos.cumulativeFeesClaimedUsd,
+            roundTripCostUsd: liveCloseCostsUsd({
+              positionSizeUsd: pos.depositedUsd,
+              ageDays: Math.max(Date.now() - pos.timestamp, 0) / DAY_MS,
+              swapCostPct: config.runnerSwapCostPct ?? 0,
+              harvestCostUsd: config.feeCaptureHarvestCostUsd ?? 0,
+              txCostUsd: config.harvestTxCostUsdEst ?? 0,
+            }),
+            fallbackMs: config.minYieldExitAgeMs ?? 43_200_000,
+          })
+        );
+      }
+
       function checkFeeIlExit(pos: PositionRecord): Effect.Effect<AgentDecision | null, Error> {
-        if (
-          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 43_200_000) &&
-          metrics.feeIlRatioKnown &&
-          feeIlRatio < 0.5
-        ) {
+        if (economicExitMature(pos) && metrics.feeIlRatioKnown && feeIlRatio < 0.5) {
           // feeIlRatioUnknown (heuristic) → skip: a fabricated-low ratio must
           // not force an exit.
           if (
@@ -11624,8 +11623,7 @@ export const program = Effect.gen(function* () {
       function checkYieldRegressionExit(
         pos: PositionRecord,
       ): Effect.Effect<AgentDecision | null, Error> {
-        const yieldWindowMature =
-          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 43_200_000);
+        const yieldWindowMature = economicExitMature(pos);
         if (
           !(
             yieldWindowMature &&

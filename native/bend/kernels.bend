@@ -337,6 +337,49 @@ def ta_rsi_trips(+rsi: Nat, +threshold: Nat) -> Bool:
 # Full TA vote: enabled AND mature AND confluence AND P&L policy.
 def ta_vote(enabled: Bool, hold_ok: Bool, confluent: Bool, pnl_ok: Bool) -> Bool:
   Bool.and(enabled, Bool.and(hold_ok, Bool.and(confluent, pnl_ok)))
+# ── Selection + evolution ────────────────────────────────────────────────
+# The market gate is the door to every lane: a floor that rejects everything
+# silently turns the agent off, and a floor relaxed during tuning must never
+# un-admit a pool that already qualified. These kernels pin both directions.
+
+# One admission floor (TVL, fees24h, volume24h, holders all reduce to this).
+def pool_admitted(+value: Nat, +floor: Nat) -> Bool:
+  Nat.is_ge(value, floor)
+
+# How many pools actually get scanned: ranked ∩ TOP_K ∩ MAX_POOLS.
+def active_count(+ranked: Nat, +top_k: Nat, +max_pools: Nat) -> Nat:
+  Nat.min(Nat.min(ranked, top_k), max_pools)
+
+# ── Dynamic hold ─────────────────────────────────────────────────────────
+# How long a position must live before an ECONOMIC exit may fire, from its
+# own realized fee rate. A fixed age gate is wrong for both a 30,000% pool
+# (round trip covered in minutes) and a 40% pool (needs days).
+#
+# Units: cost and fees in whole cents, time in whole HOURS. Bend's Nat is
+# unary, so a seconds encoding (500 x 864000) would build 4.3e8 successor
+# nodes and never finish; hours keep the same identity computable.
+#   hold_h = roundTripCost_c * age_h / accruedFees_c
+def break_even_hold_h(+cost_c: Nat, +age_h: Nat, +fees_c: Nat) -> Nat:
+  Nat.div(Nat.mul(cost_c, age_h), fees_c)
+
+# The gate actually used: the measured hold when it is known (non-zero),
+# else the configured fallback. `nonzero` carries the comparison (Bend cannot
+# match on a computed value). No cap: capping re-imposes the fixed gate.
+def maturity_gate_s(+measured_s: Nat, +fallback_s: Nat, nonzero: Bool) -> Nat:
+  match nonzero:
+    case True{}:
+      measured_s
+    case False{}:
+      fallback_s
+
+# An OPTIONAL ceiling for callers that want one (min is the only added rule).
+def maturity_gate_capped_s(+measured_s: Nat, +cap_s: Nat) -> Nat:
+  Nat.min(measured_s, cap_s)
+
+# Evolution may move a threshold, but a hard safety floor still bounds it:
+# `evolveThresholds` clamps to the band, then the safety floor applies.
+def with_hard_floor(+evolved: Nat, +hard_floor: Nat) -> Nat:
+  Nat.max(evolved, hard_floor)
 
 def main() -> Nat:
   clamp_thr(1392n, 30n, 300n)

@@ -295,6 +295,67 @@ def L.ta_vote_confluence_quiet():
 def L.ta_vote_pnl_gate_quiet():
   {==}
 
+# ── Dynamic hold (kernels appended 2026-11-26) ────────────────────────────
+
+def L.hold_break_even_exact():
+  {==}
+
+def L.hold_zero_cost_is_immediate():
+  {==}
+
+def L.hold_faster_fees_shorter():
+  {==}
+
+def L.hold_bigger_cost_longer():
+  {==}
+
+def L.maturity_uses_measured_hold():
+  {==}
+
+def L.maturity_uses_measured_hold_even_when_long():
+  {==}
+
+def L.maturity_falls_back_when_unknown():
+  {==}
+
+def L.maturity_explicit_cap_applies_only_when_asked():
+  {==}
+
+def L.maturity_explicit_cap_is_a_floor_when_under():
+  {==}
+
+# ── Selection + evolution (kernels appended 2026-11-26) ───────────────────
+
+def L.floor_inclusive_at_boundary():
+  {==}
+
+def L.floor_rejects_below():
+  {==}
+
+def L.relaxed_floor_keeps_admitted_pool():
+  {==}
+
+def L.tightened_floor_drops_pool():
+  {==}
+
+def L.capacity_bounded_by_top_k():
+  {==}
+
+def L.capacity_bounded_by_max_pools():
+  {==}
+
+def L.capacity_never_exceeds_universe():
+  {==}
+
+def L.hard_floor_survives_low_evolution():
+  {==}
+
+def L.hard_floor_survives_high_evolution():
+  {==}
+
+def L.hard_floor_at_exact_boundary():
+  {==}
+
 # Observable: the runaway pins to the ceiling.
 def main() -> Nat:
   K.clamp_thr(1392n, 30n, 300n)
