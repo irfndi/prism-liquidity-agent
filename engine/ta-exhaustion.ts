@@ -280,11 +280,16 @@ export interface TaExhaustionNetPnlInput {
   /** Live pending swap fees (feeX/feeY) the close withdrawal will sweep.
    *  NaN when unreadable — the whole projection becomes unknown. */
   readonly pendingFeesUsd?: number | undefined;
+  /** Live pending LM farm rewards the close sweeps. NaN when unreadable. */
+  readonly pendingRewardsUsd?: number | undefined;
   /** Prior paper rebalance costs the settlement debits from realized P&L. */
   readonly rebalanceCostsUsd?: number | undefined;
   /** False when the caller's mark is a fallback (live HODL/deposit) rather
    *  than a valuation of what a close would withdraw. Defaults true. */
   readonly markKnown?: boolean | undefined;
+  /** False when a live row's entry overhead was never measured: the ledger
+   *  books its realized P&L as NULL, so the projection must be unknown too. */
+  readonly entryOverheadKnown?: boolean | undefined;
   readonly ageMs: number;
   /** Paper and live close models debit different real costs. */
   readonly paperTrading: boolean;
@@ -296,20 +301,22 @@ export interface TaExhaustionNetPnlInput {
 
 /**
  * Projected realized P&L at close: mark value + claimed fees + rewards +
- * pending live fees − cost basis − prior rebalance costs − the modeled close
- * costs the settlement path debits. This is the figure the label and the
- * optional P&L gate read; it is deliberately not a ledger value (the close
- * measures the real withdrawal). Unknown inputs (an unpriced/fallback mark,
- * an unreadable pending-fee amount, a non-finite gross) return NaN — the
- * caller then labels the outcome unknown and the gate fails closed.
+ * pending live fees + pending live rewards − cost basis − prior rebalance costs
+ * − the modeled close costs the settlement path debits. This is the figure the
+ * label and the optional P&L gate read; it is deliberately not a ledger value
+ * (the close measures the real withdrawal). Unknown inputs (an unpriced or
+ * fallback mark, unreadable pending income, a live row without a measured
+ * entry overhead, a non-finite gross) return NaN — the caller then labels the
+ * outcome unknown and the gate fails closed.
  */
 export function taExhaustionNetPnlUsd(input: TaExhaustionNetPnlInput): number {
-  if (input.markKnown === false) return Number.NaN;
+  if (input.markKnown === false || input.entryOverheadKnown === false) return Number.NaN;
   const gross =
     input.currentValueUsd +
     input.cumulativeFeesClaimedUsd +
     input.cumulativeRewardsClaimedUsd +
-    (input.pendingFeesUsd ?? 0) -
+    (input.pendingFeesUsd ?? 0) +
+    (input.pendingRewardsUsd ?? 0) -
     input.depositedUsd -
     (input.rebalanceCostsUsd ?? 0);
   if (!Number.isFinite(gross)) return Number.NaN;
@@ -350,9 +357,9 @@ export function taExhaustionReasoning(signals: TaExhaustionSignals, netPnlUsd: n
     return `${base} — exhaustion exit (projected P&L unknown), before loss-side gates`;
   }
   if (netPnlUsd >= 0) {
-    return `${base} — profit-exhaustion (+$${netPnlUsd.toFixed(2)} net of modeled close costs), exiting before loss-side gates`;
+    return `${base} — profit-exhaustion (projected +$${netPnlUsd.toFixed(2)} net of modeled close costs), exiting before loss-side gates`;
   }
-  return `${base} — exhaustion exit on a losing position (-$${Math.abs(netPnlUsd).toFixed(2)} net of modeled close costs), exiting before loss-side gates`;
+  return `${base} — exhaustion exit on a losing position (projected -$${Math.abs(netPnlUsd).toFixed(2)} net of modeled close costs), exiting before loss-side gates`;
 }
 
 /**

@@ -169,24 +169,28 @@ law entry_overhead_never_negative:
 # P&L gate must agree with the settlement-identical projection. Units are US
 # cents; a projected net is a (gain, loss) pair, exactly one non-zero.
 #
-# Inclusion: prior paper rebalance costs and live pending fees move the sign.
+# Inclusion: prior paper rebalance costs and live pending fees/rewards move the
+# sign.
 law ta_rebalance_absent_is_gain:
-  {K.ta_gain_c(1011n, 0n, 0n, 0n, 1000n, 0n, 10n) == 1n : Nat}
+  {K.ta_gain_c(1011n, 0n, 0n, 0n, 0n, 1000n, 0n, 10n) == 1n : Nat}
 
 law ta_rebalance_cost_flips_to_loss:
-  {K.ta_loss_c(1011n, 0n, 0n, 0n, 1000n, 2n, 10n) == 1n : Nat}
+  {K.ta_loss_c(1011n, 0n, 0n, 0n, 0n, 1000n, 2n, 10n) == 1n : Nat}
 
 law ta_pending_fees_flip_to_gain:
-  {K.ta_gain_c(980n, 0n, 0n, 30n, 1000n, 0n, 5n) == 5n : Nat}
+  {K.ta_gain_c(980n, 0n, 0n, 30n, 0n, 1000n, 0n, 5n) == 5n : Nat}
+
+law ta_pending_rewards_flip_to_gain:
+  {K.ta_gain_c(980n, 0n, 0n, 0n, 30n, 1000n, 0n, 5n) == 5n : Nat}
 
 law ta_without_pending_is_loss:
-  {K.ta_loss_c(980n, 0n, 0n, 0n, 1000n, 0n, 5n) == 25n : Nat}
+  {K.ta_loss_c(980n, 0n, 0n, 0n, 0n, 1000n, 0n, 5n) == 25n : Nat}
 
 law ta_claimed_fees_and_rewards_credit:
-  {K.ta_gain_c(1000n, 10n, 2n, 0n, 1000n, 0n, 0n) == 12n : Nat}
+  {K.ta_gain_c(1000n, 10n, 2n, 0n, 0n, 1000n, 0n, 0n) == 12n : Nat}
 
 law ta_flat_net_is_no_loss:
-  {K.ta_loss_c(1000n, 0n, 0n, 0n, 1000n, 0n, 0n) == 0n : Nat}
+  {K.ta_loss_c(1000n, 0n, 0n, 0n, 0n, 1000n, 0n, 0n) == 0n : Nat}
 
 # Label honesty: a loss is never labeled profit (known or unknown); break-even
 # is profit (net >= 0); unknown provenance is unknown, never a sign.
@@ -205,13 +209,16 @@ law ta_label_unknown_is_unknown:
 
 # Provenance: either unknown input makes the projection unknown.
 law ta_known_requires_mark:
-  {K.ta_known(False{}, True{}) == False{} : Bool}
+  {K.ta_known(False{}, True{}, True{}) == False{} : Bool}
 
 law ta_known_requires_pending:
-  {K.ta_known(True{}, False{}) == False{} : Bool}
+  {K.ta_known(True{}, False{}, True{}) == False{} : Bool}
 
-law ta_known_when_both_present:
-  {K.ta_known(True{}, True{}) == True{} : Bool}
+law ta_known_requires_overhead:
+  {K.ta_known(True{}, True{}, False{}) == False{} : Bool}
+
+law ta_known_when_all_present:
+  {K.ta_known(True{}, True{}, True{}) == True{} : Bool}
 
 # Non-negative requires known AND zero loss.
 law ta_nonnegative_zero_loss:

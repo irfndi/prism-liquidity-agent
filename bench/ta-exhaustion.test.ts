@@ -45,7 +45,7 @@ describe("TA-exhaustion reasoning is P&L-honest (#237)", () => {
   it("labels a non-negative projected P&L as profit-exhaustion with the net figure", () => {
     const reasoning = taExhaustionReasoning(signals, 2.95);
     expect(reasoning).toContain("profit-exhaustion");
-    expect(reasoning).toContain("+$2.95");
+    expect(reasoning).toContain("projected +$2.95");
     expect(reasoning).toContain("net of modeled close costs");
   });
 
@@ -53,7 +53,7 @@ describe("TA-exhaustion reasoning is P&L-honest (#237)", () => {
     const reasoning = taExhaustionReasoning(signals, -0.36);
     expect(reasoning).not.toContain("profit-exhaustion");
     expect(reasoning).toContain("losing position");
-    expect(reasoning).toContain("-$0.36");
+    expect(reasoning).toContain("projected -$0.36");
   });
 
   it("reports unknown P&L as unknown instead of claiming either sign", () => {
@@ -100,7 +100,7 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
     expect(net).toBeCloseTo(12 - (2 * 0.005 * 1_000 + 2 * 0.005 + 0.05 * 10), 6);
   });
 
-  it("adds pending live fees the close withdrawal sweeps (unreadable → unknown)", () => {
+  it("adds pending live fees and rewards the close sweeps (unreadable → unknown)", () => {
     const base = {
       depositedUsd: 1_000,
       currentValueUsd: 980,
@@ -116,6 +116,11 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
     expect(taExhaustionNetPnlUsd({ ...base, pendingFeesUsd: 30 })).toBeCloseTo(4.99, 6);
     expect(taExhaustionNetPnlUsd({ ...base, pendingFeesUsd: 0 })).toBeCloseTo(-25.01, 6);
     expect(Number.isNaN(taExhaustionNetPnlUsd({ ...base, pendingFeesUsd: Number.NaN }))).toBe(true);
+    // Pending LM rewards are income exactly like pending swap fees.
+    expect(taExhaustionNetPnlUsd({ ...base, pendingRewardsUsd: 30 })).toBeCloseTo(4.99, 6);
+    expect(Number.isNaN(taExhaustionNetPnlUsd({ ...base, pendingRewardsUsd: Number.NaN }))).toBe(
+      true,
+    );
   });
 
   it("debits prior paper rebalance costs the settlement charges", () => {
@@ -141,6 +146,19 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
       ageMs: 0,
       paperTrading: false,
       markKnown: false,
+    });
+    expect(Number.isNaN(net)).toBe(true);
+  });
+
+  it("a live row without measured entry overhead is UNKNOWN (the ledger books NULL)", () => {
+    const net = taExhaustionNetPnlUsd({
+      depositedUsd: 1_000,
+      currentValueUsd: 1_050,
+      cumulativeFeesClaimedUsd: 1,
+      cumulativeRewardsClaimedUsd: 0,
+      ageMs: 0,
+      paperTrading: false,
+      entryOverheadKnown: false,
     });
     expect(Number.isNaN(net)).toBe(true);
   });
@@ -375,13 +393,15 @@ describe("property: TA-exhaustion projected P&L and gates (#237)", () => {
         usd(),
         usd(),
         usd(),
-        (mark, fees, rewards, pending, deposit, rebalance) => {
+        usd(),
+        (mark, fees, rewards, pendingFees, pendingRewards, deposit, rebalance) => {
           const net = taExhaustionNetPnlUsd({
             depositedUsd: deposit,
             currentValueUsd: mark,
             cumulativeFeesClaimedUsd: fees,
             cumulativeRewardsClaimedUsd: rewards,
-            pendingFeesUsd: pending,
+            pendingFeesUsd: pendingFees,
+            pendingRewardsUsd: pendingRewards,
             rebalanceCostsUsd: rebalance,
             ageMs: 0,
             paperTrading: true,
@@ -390,7 +410,10 @@ describe("property: TA-exhaustion projected P&L and gates (#237)", () => {
             conversionCostPct: 0,
             txCostUsd: 0,
           });
-          expect(net).toBeCloseTo(mark + fees + rewards + pending - deposit - rebalance, 6);
+          expect(net).toBeCloseTo(
+            mark + fees + rewards + pendingFees + pendingRewards - deposit - rebalance,
+            6,
+          );
         },
       ),
       { numRuns: 100 },

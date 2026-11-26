@@ -46,6 +46,10 @@ interface CycleOptions {
   positionValueUsd?: number;
   /** Adapter pending claimable fees; null = unpriceable. */
   pendingFeesUsd?: number | null;
+  /** Adapter pending claimable rewards; null = unpriceable. */
+  pendingRewardsUsd?: number | null;
+  /** Live entry overhead; null = unmeasured (the ledger books NULL). */
+  entryOverheadUsd?: number | null;
   /** Wait for the paper close row so the settled sign can be asserted. */
   expectClose?: boolean;
   config?: Partial<AppConfig>;
@@ -70,6 +74,7 @@ async function runCycle(opts: CycleOptions): Promise<CycleResult> {
   const now = Date.now();
   const mark = opts.positionValueUsd;
   const pending = opts.pendingFeesUsd;
+  const pendingRewards = opts.pendingRewardsUsd;
   const adapter = makeAdapter(
     {
       [POOL]: makePool({
@@ -86,6 +91,9 @@ async function runCycle(opts: CycleOptions): Promise<CycleResult> {
       ...(mark !== undefined ? { getPositionValueUsd: () => Effect.succeed(mark) } : undefined),
       ...(pending !== undefined
         ? { getClaimableFeesUsd: () => Effect.succeed(pending) }
+        : undefined),
+      ...(pendingRewards !== undefined
+        ? { getClaimableRewardsUsd: () => Effect.succeed(pendingRewards) }
         : undefined),
     },
   );
@@ -136,6 +144,7 @@ async function runCycle(opts: CycleOptions): Promise<CycleResult> {
         valuationAnchorPriceUsd: 100,
         valuationAnchorBinId: 5000,
         valuationAnchorValueUsd: 1_000,
+        entryOverheadUsd: opts.entryOverheadUsd,
       }),
     );
     if (opts.rebalanceCostsUsd !== undefined) {
@@ -168,9 +177,12 @@ async function runCycle(opts: CycleOptions): Promise<CycleResult> {
         }
         yield* Effect.sleep(50);
       }
-      return true;
+      return false;
     });
-    yield* Effect.raceFirst(program, waitForDone);
+    const done = yield* Effect.raceFirst(program, waitForDone);
+    if (done !== true) {
+      throw new Error("TA-exhaustion test: no decision/settlement within the poll budget");
+    }
     return {
       decisions: asOwner<ReadonlyArray<DecisionRow>>(yield* audit.getRecentDecisions(200)),
       closed: asOwner<ReadonlyArray<ClosedRow>>(yield* db.getClosedPositions()),
@@ -286,18 +298,20 @@ describe("TA-exhaustion E2E (#237)", () => {
       positionPubKey: LIVE_POS_ID,
       positionValueUsd: 980,
       pendingFeesUsd: 40,
+      pendingRewardsUsd: 0,
       config: { paperTrading: false },
     });
     const exit = taExit(decisions);
     expect(exit?.reasoning).toContain("profit-exhaustion");
   }, 15_000);
 
-  it("...the same live position without pending fees is a loss", async () => {
+  it("...the same live position without pending income is a loss", async () => {
     const { decisions } = await runCycle({
       currentPrice: 100,
       positionPubKey: LIVE_POS_ID,
       positionValueUsd: 980,
       pendingFeesUsd: 0,
+      pendingRewardsUsd: 0,
       config: { paperTrading: false },
     });
     const exit = taExit(decisions);
@@ -310,6 +324,7 @@ describe("TA-exhaustion E2E (#237)", () => {
       positionPubKey: LIVE_POS_ID,
       positionValueUsd: 980,
       pendingFeesUsd: null,
+      pendingRewardsUsd: 0,
       config: { paperTrading: false },
     });
     const exit = taExit(decisions);
@@ -323,9 +338,97 @@ describe("TA-exhaustion E2E (#237)", () => {
       positionPubKey: LIVE_POS_ID,
       positionValueUsd: 980,
       pendingFeesUsd: null,
+      pendingRewardsUsd: 0,
       config: { paperTrading: false, taExhaustionRequireNonnegativePnl: true },
     });
     expect(taExit(decisions)).toBeUndefined();
+    expect(decisions.some((row) => row.action !== "ENTER")).toBe(true);
+  }, 15_000);
+
+  it("live pending LM rewards the close sweeps are included in the projection", async () => {
+    // Real mark $980 (−$20) + $40 pending rewards − live close costs = +$14.99.
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: 40,
+      config: { paperTrading: false },
+    });
+    expect(taExit(decisions)?.reasoning).toContain("profit-exhaustion");
+  }, 15_000);
+
+  it("...and unpriceable pending rewards are UNKNOWN (never zero)", async () => {
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: null,
+      config: { paperTrading: false },
+    });
+    const exit = taExit(decisions);
+    expect(exit?.reasoning).toContain("P&L unknown");
+    expect(exit?.reasoning).not.toContain("profit-exhaustion");
+  }, 15_000);
+
+  it("...and the P&L gate fails closed on unreadable pending rewards", async () => {
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: null,
+      config: { paperTrading: false, taExhaustionRequireNonnegativePnl: true },
+    });
+    expect(taExit(decisions)).toBeUndefined();
+    expect(decisions.some((row) => row.action !== "ENTER")).toBe(true);
+  }, 15_000);
+
+  it("PAPER_MODE_EXIT_LIVE uses live accounting for the live close", async () => {
+    // Paper config, but a live-identity position exits through executeLive; the
+    // projection must read pending income and price the live close, not the
+    // paper one. Old code skipped pending and charged paper costs → loss.
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: 40,
+      config: { paperTrading: true, paperModeExitLive: true },
+    });
+    expect(taExit(decisions)?.reasoning).toContain("profit-exhaustion");
+  }, 15_000);
+
+  it("a live row without measured entry overhead is UNKNOWN", async () => {
+    // exitOverheadUnknown() makes the ledger realize NULL for these rows; the
+    // projection must not claim a sign the settlement cannot book.
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: 0,
+      entryOverheadUsd: null,
+      config: { paperTrading: false },
+    });
+    const exit = taExit(decisions);
+    expect(exit?.reasoning).toContain("P&L unknown");
+    expect(exit?.reasoning).not.toContain("profit-exhaustion");
+  }, 15_000);
+
+  it("...and the P&L gate fails closed on unknown entry overhead", async () => {
+    const { decisions } = await runCycle({
+      currentPrice: 100,
+      positionPubKey: LIVE_POS_ID,
+      positionValueUsd: 980,
+      pendingFeesUsd: 0,
+      pendingRewardsUsd: 0,
+      entryOverheadUsd: null,
+      config: { paperTrading: false, taExhaustionRequireNonnegativePnl: true },
+    });
+    expect(taExit(decisions)).toBeUndefined();
+    expect(decisions.some((row) => row.action !== "ENTER")).toBe(true);
   }, 15_000);
 
   it("TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL suppresses the losing exit", async () => {

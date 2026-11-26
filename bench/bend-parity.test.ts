@@ -80,6 +80,7 @@ interface TaVector {
   readonly feesUsd?: number;
   readonly rewardsUsd?: number;
   readonly pendingUsd?: number;
+  readonly pendingRewardsUsd?: number;
   readonly rebalanceUsd?: number;
   readonly swapCostPct: number;
 }
@@ -103,6 +104,7 @@ function tsTaNetCents(v: TaVector): number {
     cumulativeFeesClaimedUsd: v.feesUsd ?? 0,
     cumulativeRewardsClaimedUsd: v.rewardsUsd ?? 0,
     pendingFeesUsd: v.pendingUsd ?? 0,
+    pendingRewardsUsd: v.pendingRewardsUsd ?? 0,
     rebalanceCostsUsd: v.rebalanceUsd ?? 0,
     ageMs: 0,
     paperTrading: true,
@@ -120,6 +122,7 @@ function taKernelArgs(v: TaVector): string {
     toNat(v.feesUsd ?? 0),
     toNat(v.rewardsUsd ?? 0),
     toNat(v.pendingUsd ?? 0),
+    toNat(v.pendingRewardsUsd ?? 0),
     toNat(v.depositUsd),
     toNat(v.rebalanceUsd ?? 0),
     toNat(taCloseCostUsd(v)),
@@ -322,8 +325,9 @@ describeIf("bend parity", () => {
       // Rebalance absent vs present flips the sign at the same mark.
       { depositUsd: 5, markUsd: 5.06, swapCostPct: 0.005 },
       { depositUsd: 5, markUsd: 5.06, rebalanceUsd: 0.02, swapCostPct: 0.005 },
-      // Pending live fees flip the sign; the mark alone is a loss.
+      // Pending live income flips the sign; the mark alone is a loss.
       { depositUsd: 5, markUsd: 4.9, pendingUsd: 0.3, swapCostPct: 0.005 },
+      { depositUsd: 5, markUsd: 4.9, pendingRewardsUsd: 0.3, swapCostPct: 0.005 },
       { depositUsd: 5, markUsd: 4.9, swapCostPct: 0.005 },
       // Claimed fees + rewards are income (zero close cost).
       { depositUsd: 5, markUsd: 5, feesUsd: 0.1, rewardsUsd: 0.02, swapCostPct: 0 },

@@ -244,36 +244,46 @@ def entry_overhead_c(+spent_c: Nat, +deposit_c: Nat) -> Nat:
 # 2n = profit-exhaustion. A break-even net (loss 0) labels profit, matching the
 # TS `netPnlUsd >= 0` condition.
 
-# Projected income the close credits: mark + claimed fees + rewards + pending.
-def ta_income_c(+mark_c: Nat, +fees_c: Nat, +rewards_c: Nat, +pending_c: Nat) -> Nat:
-  Nat.add(Nat.add(mark_c, fees_c), Nat.add(rewards_c, pending_c))
+# Projected income the close credits: mark + claimed fees/rewards + pending
+# swap fees + pending LM rewards.
+def ta_income_c(
+  +mark_c: Nat, +fees_c: Nat, +rewards_c: Nat,
+  +pending_fees_c: Nat, +pending_rewards_c: Nat,
+) -> Nat:
+  Nat.add(
+    Nat.add(mark_c, fees_c),
+    Nat.add(rewards_c, Nat.add(pending_fees_c, pending_rewards_c)),
+  )
 
 # Projected outgo the close debits: basis + prior paper rebalance + close costs.
 def ta_outgo_c(+deposit_c: Nat, +rebalance_c: Nat, +close_c: Nat) -> Nat:
   Nat.add(deposit_c, Nat.add(rebalance_c, close_c))
 
 def ta_gain_c(
-  +mark_c: Nat, +fees_c: Nat, +rewards_c: Nat, +pending_c: Nat,
+  +mark_c: Nat, +fees_c: Nat, +rewards_c: Nat,
+  +pending_fees_c: Nat, +pending_rewards_c: Nat,
   +deposit_c: Nat, +rebalance_c: Nat, +close_c: Nat,
 ) -> Nat:
   Nat.sub(
-    ta_income_c(mark_c, fees_c, rewards_c, pending_c),
+    ta_income_c(mark_c, fees_c, rewards_c, pending_fees_c, pending_rewards_c),
     ta_outgo_c(deposit_c, rebalance_c, close_c),
   )
 
 def ta_loss_c(
-  +mark_c: Nat, +fees_c: Nat, +rewards_c: Nat, +pending_c: Nat,
+  +mark_c: Nat, +fees_c: Nat, +rewards_c: Nat,
+  +pending_fees_c: Nat, +pending_rewards_c: Nat,
   +deposit_c: Nat, +rebalance_c: Nat, +close_c: Nat,
 ) -> Nat:
   Nat.sub(
     ta_outgo_c(deposit_c, rebalance_c, close_c),
-    ta_income_c(mark_c, fees_c, rewards_c, pending_c),
+    ta_income_c(mark_c, fees_c, rewards_c, pending_fees_c, pending_rewards_c),
   )
 
-# Mark provenance: the live on-chain mark AND readable pending fees. Either
-# unknown makes the projection unknown (fallback HODL/deposit is not a close).
-def ta_known(mark_known: Bool, pending_known: Bool) -> Bool:
-  Bool.and(mark_known, pending_known)
+# Provenance: a real on-chain mark AND readable pending fees/rewards AND a
+# measured entry overhead. Any unknown makes the projection unknown (the TS
+# returns NaN; a live close without overhead books NULL realized).
+def ta_known(mark_known: Bool, pending_known: Bool, overhead_known: Bool) -> Bool:
+  Bool.and(mark_known, Bool.and(pending_known, overhead_known))
 
 # 0n unknown / 1n losing / 2n profit-exhaustion (net >= 0).
 def ta_label(+loss_c: Nat, known: Bool) -> Nat:

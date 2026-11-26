@@ -5712,6 +5712,40 @@ export const makeAdapterLive = (
               ),
             ),
           ),
+        // Pending LM rewards for the TA-exhaustion P&L projection: the close
+        // sweeps rewardOne/rewardTwo and the ledger counts their priced value.
+        // Null when any pending slot is unpriceable (unknown mint / missing
+        // price or decimals) - callers treat null as unknown, never zero.
+        getClaimableRewardsUsd: (poolAddress, positionPubKey) =>
+          Effect.gen(function* () {
+            const dlmm = yield* getDlmm(poolAddress);
+            const position = yield* Effect.tryPromise(() =>
+              dlmm.getPosition(new PublicKey(positionPubKey)),
+            );
+            const slots = buildRewardClaimSlots(
+              dlmm.lbPair.rewardInfos,
+              Number(position.positionData.rewardOne.toString()),
+              Number(position.positionData.rewardTwo.toString()),
+            );
+            if (slots.length === 0) return 0;
+            const pricedMints = slots
+              .map((slot) => rewardMintOrUnknown(slot.mint))
+              .filter((mint) => mint !== "unknown");
+            const prices = yield* fetchRewardPrices(pricedMints);
+            const rewards = yield* priceRewardClaimSlots(slots, prices, poolAddress);
+            if (rewards.some((reward) => reward.amountUsd === null)) return null;
+            return rewards.reduce((sum, reward) => sum + (reward.amountUsd ?? 0), 0);
+          }).pipe(
+            Effect.catch((err) =>
+              Effect.fail(
+                new AdapterError({
+                  message: `Failed to read claimable rewards: ${String(err)}`,
+                  poolAddress,
+                  cause: err,
+                }),
+              ),
+            ),
+          ),
         convertClaimedFees: (poolAddress, destination, feeX, feeY) =>
           Effect.gen(function* () {
             if (!wallet)

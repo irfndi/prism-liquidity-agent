@@ -453,6 +453,18 @@ export interface AdapterApi {
     poolAddress: string,
     positionPubKey: string,
   ) => Effect.Effect<number | null, Error>;
+  /**
+   * Pending LM farm rewards priced in USD, read before the TA-exhaustion P&L
+   * projection. The close sweeps `rewardOne`/`rewardTwo` and the ledger counts
+   * their priced value, so the projection must include them. `null` when any
+   * pending reward slot is unpriceable (unknown mint, missing price/decimals);
+   * callers treat null as unknown, never zero. Optional so existing mocks
+   * compile unchanged; a live position whose adapter lacks it projects unknown.
+   */
+  readonly getClaimableRewardsUsd?: (
+    poolAddress: string,
+    positionPubKey: string,
+  ) => Effect.Effect<number | null, Error>;
   readonly convertClaimedFees?: (
     poolAddress: string,
     destination: "accumulate-quote" | "accumulate-sol",

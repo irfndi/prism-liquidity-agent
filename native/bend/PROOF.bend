@@ -189,6 +189,9 @@ def L.ta_rebalance_cost_flips_to_loss():
 def L.ta_pending_fees_flip_to_gain():
   {==}
 
+def L.ta_pending_rewards_flip_to_gain():
+  {==}
+
 def L.ta_without_pending_is_loss():
   {==}
 
@@ -220,7 +223,10 @@ def L.ta_known_requires_mark():
 def L.ta_known_requires_pending():
   {==}
 
-def L.ta_known_when_both_present():
+def L.ta_known_requires_overhead():
+  {==}
+
+def L.ta_known_when_all_present():
   {==}
 
 def L.ta_nonnegative_zero_loss():

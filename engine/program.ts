@@ -909,6 +909,11 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** Bound on the TA-exhaustion pending-income reads: a stalled RPC must never
+ *  hold the TA vote (and the loss-side exits queued behind it); a timeout is
+ *  treated as unknown, never zero. */
+const TA_PENDING_READ_TIMEOUT = "2 seconds";
+
 /**
  * Paper notional-fee accrual for one cycle (A4 paper/live parity). A paper
  * position never claims on-chain, so it accrues its concentration-aware share
@@ -11340,26 +11345,52 @@ export const program = Effect.gen(function* () {
               minFeeIlRatio: config.taExhaustionMinFeeIlRatio,
             });
           }
+          // Mirror the EXIT execution dispatch: live mode always uses live
+          // accounting, and paper mode's PAPER_MODE_EXIT_LIVE hybrid uses it for
+          // a live-identity position. The projection must price the close the
+          // selected executor will actually run.
+          function taLiveAccounting(position: PositionRecord): boolean {
+            return (
+              !config.paperTrading ||
+              (config.paperModeExitLive === true && position.positionPubKey !== null)
+            );
+          }
           // Paper settlement debits the modeled costs of every prior rebalance
           // (paperRebalanceCostsUsd over the position's REBALANCE events), so
-          // the projection must debit them too. A read failure matches the
-          // close path (caught → no rebalance costs).
+          // the projection must debit them too. A live-executed close does not
+          // charge them; a read failure matches the close path (caught → 0).
           function readTaRebalanceCosts(position: PositionRecord): Effect.Effect<number, never> {
-            if (!config.paperTrading) return Effect.succeed(0);
+            if (taLiveAccounting(position)) return Effect.succeed(0);
             return db.getPositionEvents(poolAddress).pipe(
               Effect.map((events) => paperRebalanceCostsUsd(events, position.positionId)),
               Effect.catch(() => Effect.succeed(0)),
             );
           }
-          // A live close withdraws the position's pending swap fees, which the
-          // mark (position holdings) does not include. Paper mode never closes
-          // a live row, so it skips the extra chain read. Unreadable/unpriceable
-          // pending fees make the whole projection unknown (fail-closed).
+          // A live close withdraws pending swap fees and sweeps pending LM
+          // rewards; the mark (position holdings) includes neither. Reads are
+          // bounded so a stalled RPC can never hold the TA vote (and the
+          // loss-side exits queued behind it); a timeout or failed read is
+          // unknown (NaN), never zero.
           function readTaPendingFeesUsd(position: PositionRecord): Effect.Effect<number, never> {
-            if (config.paperTrading || position.positionPubKey === null) return Effect.succeed(0);
+            if (!taLiveAccounting(position) || position.positionPubKey === null) {
+              return Effect.succeed(0);
+            }
             const read = adapter.getClaimableFeesUsd;
             if (read === undefined) return Effect.succeed(Number.NaN);
             return read(poolAddress, position.positionPubKey).pipe(
+              Effect.timeout(TA_PENDING_READ_TIMEOUT),
+              Effect.map((usd) => (usd === null ? Number.NaN : usd)),
+              Effect.catch(() => Effect.succeed(Number.NaN)),
+            );
+          }
+          function readTaPendingRewardsUsd(position: PositionRecord): Effect.Effect<number, never> {
+            if (!taLiveAccounting(position) || position.positionPubKey === null) {
+              return Effect.succeed(0);
+            }
+            const read = adapter.getClaimableRewardsUsd;
+            if (read === undefined) return Effect.succeed(Number.NaN);
+            return read(poolAddress, position.positionPubKey).pipe(
+              Effect.timeout(TA_PENDING_READ_TIMEOUT),
               Effect.map((usd) => (usd === null ? Number.NaN : usd)),
               Effect.catch(() => Effect.succeed(Number.NaN)),
             );
@@ -11374,8 +11405,12 @@ export const program = Effect.gen(function* () {
               // Pure preflight: the per-position DB/SDK reads below only run
               // when the confluence would actually vote.
               if (taExhaustionVote({ closes, ageMs, policy }) === null) return null;
+              const liveAccounting = taLiveAccounting(position);
               const rebalanceCostsUsd = yield* readTaRebalanceCosts(position);
-              const pendingFeesUsd = yield* readTaPendingFeesUsd(position);
+              const [pendingFeesUsd, pendingRewardsUsd] = yield* Effect.all(
+                [readTaPendingFeesUsd(position), readTaPendingRewardsUsd(position)],
+                { concurrency: 2 },
+              );
               return maybeTaExhaustionExit({
                 poolAddress,
                 positionId: position.positionId,
@@ -11387,10 +11422,16 @@ export const program = Effect.gen(function* () {
                   cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
                   cumulativeRewardsClaimedUsd: position.cumulativeRewardsClaimedUsd,
                   pendingFeesUsd,
+                  pendingRewardsUsd,
                   rebalanceCostsUsd,
                   markKnown: position.valueMarkKnown === true,
+                  // A live row without a measured entry overhead settles as
+                  // NULL (exitOverheadUnknown); its projection is unknown too.
+                  entryOverheadKnown:
+                    !(liveAccounting && position.positionPubKey !== null) ||
+                    position.entryOverheadUsd != null,
                   ageMs,
-                  paperTrading: config.paperTrading,
+                  paperTrading: !liveAccounting,
                   swapCostPct: config.runnerSwapCostPct,
                   harvestCostUsd: config.feeCaptureHarvestCostUsd,
                   conversionCostPct: config.feeCaptureConversionCostPct,
