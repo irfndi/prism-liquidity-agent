@@ -58,7 +58,7 @@ jobs:
       # packages in the global store, so this cache is what makes `bun install`
       # a link step instead of a download.
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -106,7 +106,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -139,7 +139,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -187,7 +187,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -205,8 +205,13 @@ jobs:
       # anchor ESM initializer) is reported as a notice instead of a red check,
       # because the un-compiled bundle is the supported artifact. Any other
       # failure still fails the job.
+      #
+      # Both bundles are built here: the CLI one for `prism`, and the engine one
+      # for `prismd` (the split out of `build` dropped it once, and the job
+      # failed with "Missing bundle for prismd" — cheap to keep honest).
       - name: Build and smoke-test compiled binaries
         run: |
+          bun run build
           bunx --bun tsdown --config tsdown.cli.config.ts
           for profile in prism prismd; do
             if ! out=$(bun scripts/compile-binary.ts "$profile" 2>&1); then
@@ -248,7 +253,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -301,7 +306,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -364,7 +369,7 @@ jobs:
           node-version: 26
 
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -434,7 +439,7 @@ jobs:
           node-version: 26
 
       - name: Cache Bun install artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -597,7 +602,7 @@ jobs:
       # The cached ~/.bend freezes the prover version; bump the key to take a
       # new Bend release so a drift in prover behaviour is a deliberate change.
       - name: Cache Bend
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bend
           key: ${{ runner.os }}-bend-2.0
@@ -683,7 +688,7 @@ jobs:
 
       # Same freeze as rust-host: bump the key to adopt a new Bend release.
       - name: Cache Bend
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bend
           key: ${{ runner.os }}-bend-2.0
@@ -715,13 +720,13 @@ jobs:
           persist-credentials: false
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Cache TLC
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: native/tla/tla2tools.jar
           key: ${{ runner.os }}-tla2tools-1.8.0
