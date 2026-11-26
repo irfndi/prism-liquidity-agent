@@ -66,7 +66,7 @@ function makePositionData(overrides: Partial<FakePositionData> = {}): FakePositi
     totalYAmountExcludeTransferFee: new BN(300_000_000),
     feeXExcludeTransferFee: new BN(0),
     feeYExcludeTransferFee: new BN(0),
-    rewardOneExcludeTransferFee: new BN(0),
+    rewardOneExcludeTransferFee: new BN(250_000_000),
     rewardTwoExcludeTransferFee: new BN(0),
     lastUpdatedAt: 0,
     ...overrides,
@@ -432,6 +432,88 @@ describe("AdapterService.claimRewards", () => {
       const second = result.rewards.find((r) => r.mint === REWARD_MINT_2.toBase58());
       expect(first?.amountUsd).toBeCloseTo(100, 6); // 250 × $0.40
       expect(second?.amountUsd).toBeCloseTo(100, 6); // 50 × $2
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("AdapterService.getClaimableRewardsUsd (TA P&L projection)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    dlmmState.current = null;
+  });
+
+  it("prices the pending LM rewards the close sweeps", async () => {
+    dlmmState.current = makeFakeDlmm({ positionData: makePositionData() });
+    mockRewardMintDecimals(6);
+    const restore = mockPrices({ [REWARD_MINT.toBase58()]: 0.4 });
+    try {
+      const usd = await runWithAdapter(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          return yield* adapter.getClaimableRewardsUsd!(POOL_ADDRESS, POSITION_ADDRESS);
+        }),
+      );
+      // 250 tokens × $0.40
+      expect(usd).toBeCloseTo(100, 6);
+    } finally {
+      restore();
+    }
+  });
+
+  it("prices the NET transfer-fee-excluded amount the exit sweeps", async () => {
+    dlmmState.current = makeFakeDlmm({
+      positionData: makePositionData({
+        rewardOne: new BN(250_000_000),
+        rewardOneExcludeTransferFee: new BN(200_000_000),
+      }),
+    });
+    mockRewardMintDecimals(6);
+    const restore = mockPrices({ [REWARD_MINT.toBase58()]: 0.4 });
+    try {
+      const usd = await runWithAdapter(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          return yield* adapter.getClaimableRewardsUsd!(POOL_ADDRESS, POSITION_ADDRESS);
+        }),
+      );
+      // 200 tokens × $0.40, not the gross 250 × $0.40.
+      expect(usd).toBeCloseTo(80, 6);
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns 0 when nothing is pending", async () => {
+    dlmmState.current = makeFakeDlmm({
+      positionData: makePositionData({
+        rewardOne: new BN(0),
+        rewardTwo: new BN(0),
+        rewardOneExcludeTransferFee: new BN(0),
+        rewardTwoExcludeTransferFee: new BN(0),
+      }),
+    });
+    const usd = await runWithAdapter(
+      Effect.gen(function* () {
+        const adapter = yield* AdapterService;
+        return yield* adapter.getClaimableRewardsUsd!(POOL_ADDRESS, POSITION_ADDRESS);
+      }),
+    );
+    expect(usd).toBe(0);
+  });
+
+  it("returns null when a pending reward slot is unpriceable (never a fabricated 0)", async () => {
+    dlmmState.current = makeFakeDlmm({ positionData: makePositionData() });
+    const restore = mockPrices({});
+    try {
+      const usd = await runWithAdapter(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          return yield* adapter.getClaimableRewardsUsd!(POOL_ADDRESS, POSITION_ADDRESS);
+        }),
+      );
+      expect(usd).toBeNull();
     } finally {
       restore();
     }

@@ -5724,8 +5724,11 @@ export const makeAdapterLive = (
             );
             const slots = buildRewardClaimSlots(
               dlmm.lbPair.rewardInfos,
-              Number(position.positionData.rewardOne.toString()),
-              Number(position.positionData.rewardTwo.toString()),
+              // Net of a Token-2022 transfer fee, matching exitPosition's
+              // rewardOne/TwOExcludeTransferFee valuation (gross amounts would
+              // overstate the swept proceeds in the TA projection).
+              Number(position.positionData.rewardOneExcludeTransferFee.toString()),
+              Number(position.positionData.rewardTwoExcludeTransferFee.toString()),
             );
             if (slots.length === 0) return 0;
             const pricedMints = slots
