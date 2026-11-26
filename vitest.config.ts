@@ -11,7 +11,13 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["bench/**/*.test.ts"],
-    testTimeout: 30000,
+    testTimeout: 120000,
+    // A handful of suites spawn real `bun cli/index.ts` subprocesses (60s+
+    // each under load) and race the live scan loop. On a loaded machine one of
+    // them can blow even a generous budget, so a single retry absorbs pure
+    // harness timing without hiding a deterministic failure (a real regression
+    // fails both attempts).
+    retry: 1,
     coverage: {
       provider: "istanbul",
       include: ["engine/**/*.ts"],

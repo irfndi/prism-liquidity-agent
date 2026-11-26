@@ -326,27 +326,34 @@ describe("autonomous CLI operator surface", () => {
     expect(text).not.toContain("Stranded:");
   });
 
-  it("marks the current wallet's active safety pause resolved without live execution", async () => {
-    // Given
-    testDirectory = mkdtempSync(join(tmpdir(), "prism-cli-autonomous-resume-"));
-    const dbPath = join(testDirectory, "prism.db");
-    const walletKeypair = Keypair.generate();
-    const wallet = walletKeypair.publicKey.toBase58();
-    const agentInstanceId = "operator-test";
-    await seedAutonomousState(dbPath, wallet, agentInstanceId);
-    const environment = {
-      SQLITE_DB_PATH: dbPath,
-      AGENT_INSTANCE_ID: agentInstanceId,
-      WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
-    };
+  // Spawns two real CLI subprocesses (resume + status), each booting the
+  // Effect layer and SQLite. Under the full 161-file suite this exceeds the
+  // 30s default on a loaded machine, so it carries its own budget.
+  it(
+    "marks the current wallet's active safety pause resolved without live execution",
+    { timeout: 120_000 },
+    async () => {
+      // Given
+      testDirectory = mkdtempSync(join(tmpdir(), "prism-cli-autonomous-resume-"));
+      const dbPath = join(testDirectory, "prism.db");
+      const walletKeypair = Keypair.generate();
+      const wallet = walletKeypair.publicKey.toBase58();
+      const agentInstanceId = "operator-test";
+      await seedAutonomousState(dbPath, wallet, agentInstanceId);
+      const environment = {
+        SQLITE_DB_PATH: dbPath,
+        AGENT_INSTANCE_ID: agentInstanceId,
+        WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
+      };
 
-    // When
-    const resume = runCli(["resume"], environment);
-    const status = runCli(["status", "--json"], environment);
+      // When
+      const resume = runCli(["resume"], environment);
+      const status = runCli(["status", "--json"], environment);
 
-    // Then
-    expect(resume.exitCode).toBe(0);
-    const output = decodeJsonObject(status.stdout);
-    expect(output["autonomous"]).toMatchObject({ safetyPause: { active: false } });
-  });
+      // Then
+      expect(resume.exitCode).toBe(0);
+      const output = decodeJsonObject(status.stdout);
+      expect(output["autonomous"]).toMatchObject({ safetyPause: { active: false } });
+    },
+  );
 });

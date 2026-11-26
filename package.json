@@ -39,7 +39,10 @@
     "format": "oxfmt --write engine ops bench cli scripts",
     "format:check": "oxfmt --check engine ops bench cli scripts",
     "coverage": "bun --bun vitest run --coverage",
-    "prepare": "effect-tsgo patch --oxlint || echo \"warning: effect-tsgo patch failed (unsupported platform or version mismatch) — type-aware effect lint disabled\""
+    "prepare": "effect-tsgo patch --oxlint || echo \"warning: effect-tsgo patch failed (unsupported platform or version mismatch) — type-aware effect lint disabled\"",
+    "verify": "bash scripts/verify.sh",
+    "verify:bend": "cd native/bend && ${BEND_BIN:-$HOME/.bend/bin/bend} PROOF.bend",
+    "verify:tla": "cd native/tla && java -XX:+UseParallelGC -cp tla2tools.jar tlc2.TLC -config LedgerFixed.cfg -workers auto Ledger.tla"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",

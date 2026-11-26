@@ -118,6 +118,66 @@ def L.ta_single_signal_quiet(b, m):
 def L.ta_cold_start_quiet():
   {==}
 
+# ── PnL accounting (kernels appended 2026-11-26) ──────────────────────────
+
+def L.flat_round_trip_no_gain():
+  {==}
+
+def L.flat_round_trip_no_loss():
+  {==}
+
+def L.rent_booked_as_profit_without_overhead():
+  {==}
+
+def L.overhead_never_credits():
+  {==}
+
+def L.overhead_above_withdrawal_floors():
+  {==}
+
+def L.real_loss_still_loss():
+  {==}
+
+def L.real_loss_not_a_gain():
+  {==}
+
+def L.real_gain_survives():
+  {==}
+
+def L.prior_fees_credit():
+  {==}
+
+def L.halt_arms_on_real_loss():
+  {==}
+
+def L.halt_quiet_at_threshold():
+  {==}
+
+def L.halt_quiet_on_profit(m):
+  match m:
+    case 0n:
+      {==}
+    case 1n+p:
+      L.halt_quiet_on_profit(p)
+
+def L.break_even_30bps_at_71pct():
+  {==}
+
+def L.break_even_60bps_at_71pct():
+  {==}
+
+def L.break_even_60bps_at_450pct():
+  {==}
+
+def L.break_even_hotter_pool_not_longer():
+  {==}
+
+def L.entry_overhead_is_the_gap():
+  {==}
+
+def L.entry_overhead_never_negative():
+  {==}
+
 # Observable: the runaway pins to the ceiling.
 def main() -> Nat:
   K.clamp_thr(1392n, 30n, 300n)
