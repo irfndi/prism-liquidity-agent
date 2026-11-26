@@ -2,6 +2,29 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.47] — 2026-11-26
+
+### Added
+
+- **`prism scan-diag` (#246).** Runs the live market gate against the live universe and prints the rejection histogram, so a config change is measurable in seconds instead of waiting for a 30-minute refresh. It reuses `resolveMarketScanConfig` and `gateAndRankMarketPools` verbatim, so it cannot drift from production selection.
+- **Gate rejection histograms (#246).** The scan refresh logs the bucket counts behind `passed`, with parity to the launch radar. A `passed: 0` refresh used to be unexplainable.
+
+### Fixed
+
+- **The market gate admitted 2 of 3,000 pools.** Measured with `scan-diag`: the absolute floors `MARKET_SCAN_MIN_FEES_24H_USD=3000` and `MARKET_SCAN_MIN_VOLUME_24H_USD=1000000` were the wall, not the engine. At `$300` / `$250k` / 500 holders the same universe admits 45. Reconfigured on the live box; `passed` went from 0 to 20.
+- **Dynamic exit maturity (#247).** The fixed `MIN_YIELD_EXIT_AGE_MS` gate is replaced by the position's own realized fee rate: `breakEvenHoldMs = roundTripCostUsd × ageMs / accruedFeesUsd`. That is `cost% × 365 / APR%` measured, so a decaying pool cannot keep a grace period it no longer earns. At 30,000% APR that is minutes; at 40% APR, about 11 days. Unknown rate falls back to the configured gate. Deliberately uncapped, because a cap re-imposes the fixed gate; `MAX_POSITION_AGE_MS` (7d) and fee starvation (72h) remain the backstops.
+
+### Verification
+
+- **TLA+ policy model (#247).** `Policy.tla` enumerates 10,648 observations of the EXIT/HOLD/ROTATE decision and checks five invariants: safety always wins, no economic exit on positive carry (the 2026-11 hold-bias defect), no exit before dynamic maturity, no rotation out of positive carry, and rotation needs a 3× net edge. `PolicyFixed.cfg` passes; `PolicyBuggy.cfg` must fail on `NoEconomicExitOnPositiveCarry`. The gate now runs four TLC models and every buggy one must fail.
+- **EXIT precedence property test (#247).** For each of the seven risk gates it first asserts a non-EXIT action IS rejected, then flips the action to EXIT and asserts approval, plus a 72-point grid. Proven able to fail: moving `checkConfidenceGate` above the EXIT branch turns 4 tests red.
+- **Project skill `.opencode/skills/verify-exit-precedence`.** Tells the next agent whether a change touches the gate chain, how to run the check in 0.2s, how to read a failure, and when the verification needs updating.
+- Bend: 15 new laws for the hold arithmetic and 10 for selection and evolution. Kernel arithmetic is in whole hours, because Bend's `Nat` is unary and a seconds encoding multiplies into 4.3e8 successor nodes.
+
+### Notes
+
+- The cycle is still too slow for its interval: 293s for 24 pools against `SCAN_INTERVAL_MS=120000`, after switching from the public RPC to Helius and dropping `RPC_MIN_INTERVAL_MS` from 500 to 50 (it was 399s). Helius' free tier now throttles. This is the next blocker: every time-based gate reads a cadence it never actually achieves.
+
 ## [0.2.46] — 2026-11-26
 
 ### Fixed

@@ -143,6 +143,45 @@ describe("ConfigService pool PnL kill switch", () => {
   });
 });
 
+describe("ConfigService TA-exhaustion policy (#237)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to the pre-#237 behavior (on, RSI 90, no hold floor, no P&L gate)", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.taExhaustionEnabled).toBe(true);
+    expect(cfg.taExhaustionRsiThreshold).toBe(90);
+    expect(cfg.taExhaustionMinHoldMs).toBe(0);
+    expect(cfg.taExhaustionRequireNonnegativePnl).toBe(false);
+    expect(cfg.taExhaustionMinFeeIlRatio).toBe(1.2);
+  });
+
+  it("carries explicit overrides", async () => {
+    vi.stubEnv("TA_EXHAUSTION_ENABLED", "false");
+    vi.stubEnv("TA_EXHAUSTION_RSI_THRESHOLD", "95");
+    vi.stubEnv("TA_EXHAUSTION_MIN_HOLD_MS", "3600000");
+    vi.stubEnv("TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL", "true");
+    vi.stubEnv("TA_EXHAUSTION_MIN_FEE_IL_RATIO", "2");
+    const cfg = await loadConfig();
+    expect(cfg.taExhaustionEnabled).toBe(false);
+    expect(cfg.taExhaustionRsiThreshold).toBe(95);
+    expect(cfg.taExhaustionMinHoldMs).toBe(3_600_000);
+    expect(cfg.taExhaustionRequireNonnegativePnl).toBe(true);
+    expect(cfg.taExhaustionMinFeeIlRatio).toBe(2);
+  });
+
+  it("clamps the threshold, hold floor and fee/IL floor to their bounds", async () => {
+    vi.stubEnv("TA_EXHAUSTION_RSI_THRESHOLD", "200");
+    vi.stubEnv("TA_EXHAUSTION_MIN_HOLD_MS", "-1");
+    vi.stubEnv("TA_EXHAUSTION_MIN_FEE_IL_RATIO", "25");
+    const cfg = await loadConfig();
+    expect(cfg.taExhaustionRsiThreshold).toBe(100);
+    expect(cfg.taExhaustionMinHoldMs).toBe(0);
+    expect(cfg.taExhaustionMinFeeIlRatio).toBe(20);
+  });
+});
+
 describe("ConfigService upper-bound clamping", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

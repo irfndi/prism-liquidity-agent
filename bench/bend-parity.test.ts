@@ -21,7 +21,17 @@ import {
   MIN_FEE_IL_EVOLVED_MAX,
   MAX_FEE_IL_RATIO,
 } from "../engine/strategy-service.js";
-import { isTaExhausted } from "../engine/ta-exhaustion.js";
+import {
+  isTaExhausted,
+  maybeTaExhaustionExit,
+  taExhaustionNetPnlUsd,
+  taExhaustionPnlGateSatisfied,
+  taExhaustionSignals,
+  taExhaustionVote,
+  TA_EXHAUSTION_DEFAULT_POLICY,
+  type TaExhaustionPolicy,
+} from "../engine/ta-exhaustion.js";
+import { paperCloseCostsUsd } from "../engine/fee-capture.js";
 import { isBendAvailable, runBendNat, runBendBool, toNat } from "./bend-parity-harness.js";
 
 const BEND = isBendAvailable();
@@ -59,6 +69,99 @@ function tsExitOrder(tpHit: boolean, taHit: boolean, lossHit: boolean): number {
   if (taHit) return 2;
   if (lossHit) return 3;
   return 0;
+}
+
+// ── TA-exhaustion projected P&L / policy parity (#237) ─────────────────────
+// The trigger series is the issue's 39-flat + one-uptick shape: RSI(2)=100,
+// %B=1.59, above BB-upper, first green MACD histogram.
+const TA_TRIGGER_CLOSES: readonly number[] = [...Array<number>(39).fill(90), 90.9];
+
+interface TaVector {
+  readonly depositUsd: number;
+  readonly markUsd: number;
+  readonly feesUsd?: number;
+  readonly rewardsUsd?: number;
+  readonly pendingUsd?: number;
+  readonly pendingRewardsUsd?: number;
+  readonly rebalanceUsd?: number;
+  readonly swapCostPct: number;
+}
+
+function taCloseCostUsd(v: TaVector): number {
+  return paperCloseCostsUsd({
+    positionSizeUsd: v.depositUsd,
+    ageDays: 0,
+    cumulativeGrossFeesUsd: v.feesUsd ?? 0,
+    swapCostPct: v.swapCostPct,
+    harvestCostUsd: 0,
+    conversionCostPct: 0,
+    txCostUsd: 0,
+  });
+}
+
+function tsTaNetCents(v: TaVector): number {
+  const net = taExhaustionNetPnlUsd({
+    depositedUsd: v.depositUsd,
+    currentValueUsd: v.markUsd,
+    cumulativeFeesClaimedUsd: v.feesUsd ?? 0,
+    cumulativeRewardsClaimedUsd: v.rewardsUsd ?? 0,
+    pendingFeesUsd: v.pendingUsd ?? 0,
+    pendingRewardsUsd: v.pendingRewardsUsd ?? 0,
+    rebalanceCostsUsd: v.rebalanceUsd ?? 0,
+    ageMs: 0,
+    paperTrading: true,
+    swapCostPct: v.swapCostPct,
+    harvestCostUsd: 0,
+    conversionCostPct: 0,
+    txCostUsd: 0,
+  });
+  return Math.round(net * 100);
+}
+
+function taKernelArgs(v: TaVector): string {
+  return [
+    toNat(v.markUsd),
+    toNat(v.feesUsd ?? 0),
+    toNat(v.rewardsUsd ?? 0),
+    toNat(v.pendingUsd ?? 0),
+    toNat(v.pendingRewardsUsd ?? 0),
+    toNat(v.depositUsd),
+    toNat(v.rebalanceUsd ?? 0),
+    toNat(taCloseCostUsd(v)),
+  ].join(", ");
+}
+
+function tsTaGate(requireNonnegativePnl: boolean, netUsd: number, ratio: number | null): boolean {
+  const policy: TaExhaustionPolicy = {
+    ...TA_EXHAUSTION_DEFAULT_POLICY,
+    requireNonnegativePnl,
+    minFeeIlRatio: 1.2,
+  };
+  return taExhaustionPnlGateSatisfied({ netPnlUsd: netUsd, feeIlRatio: ratio, policy });
+}
+
+function tsTaLabelCode(netUsd: number): number {
+  const decision = maybeTaExhaustionExit({
+    poolAddress: "TaParityPool",
+    positionId: "ta-parity-pos",
+    closes: TA_TRIGGER_CLOSES,
+    ageMs: 0,
+    netPnlUsd: netUsd,
+    feeIlRatio: null,
+  });
+  if (decision === null) throw new Error("trigger fixture must vote");
+  if (decision.reasoning.includes("P&L unknown")) return 0;
+  return decision.reasoning.includes("profit-exhaustion") ? 2 : 1;
+}
+
+function tsTaHoldVotes(ageMs: number, minHoldMs: number): boolean {
+  return (
+    taExhaustionVote({
+      closes: TA_TRIGGER_CLOSES,
+      ageMs,
+      policy: { ...TA_EXHAUSTION_DEFAULT_POLICY, minHoldMs },
+    }) !== null
+  );
 }
 
 describeIf("bend parity", () => {
@@ -196,7 +299,8 @@ describeIf("bend parity", () => {
 
   // Real-fn parity: engine/ta-exhaustion.ts isTaExhausted is the source of
   // truth — RSI(2) overbought AND (close above BB-upper OR first MACD-green
-  // histogram). Mirrors native ta_exhausted_truth_table; LAWS pending strategy review.
+  // histogram). Mirrors native ta_exhausted_truth_table; LAWS triple proved
+  // (ta_overbought_fires / ta_single_signal_quiet / ta_cold_start_quiet).
   it("TA-exhaustion fires on RSI AND (BB OR MACD) (kernels.bend:ta_exhausted)", () => {
     expect(runBendBool("K.ta_exhausted(True{}, True{}, True{})")).toBe(
       isTaExhausted(true, true, true),
@@ -216,6 +320,105 @@ describeIf("bend parity", () => {
     expect(runBendBool("K.ta_exhausted(False{}, False{}, False{})")).toBe(
       isTaExhausted(false, false, false),
     );
+  });
+
+  it("TA projected P&L matches gain/loss incl. rebalance + pending fees (#237)", () => {
+    const vectors: TaVector[] = [
+      // Rebalance absent vs present flips the sign at the same mark.
+      { depositUsd: 5, markUsd: 5.06, swapCostPct: 0.005 },
+      { depositUsd: 5, markUsd: 5.06, rebalanceUsd: 0.02, swapCostPct: 0.005 },
+      // Pending live income flips the sign; the mark alone is a loss.
+      { depositUsd: 5, markUsd: 4.9, pendingUsd: 0.3, swapCostPct: 0.005 },
+      { depositUsd: 5, markUsd: 4.9, pendingRewardsUsd: 0.3, swapCostPct: 0.005 },
+      { depositUsd: 5, markUsd: 4.9, swapCostPct: 0.005 },
+      // Claimed fees + rewards are income (zero close cost).
+      { depositUsd: 5, markUsd: 5, feesUsd: 0.1, rewardsUsd: 0.02, swapCostPct: 0 },
+    ];
+    for (const vector of vectors) {
+      const net = tsTaNetCents(vector);
+      const gain = BigInt(Math.max(0, net));
+      const loss = BigInt(Math.max(0, -net));
+      const args = taKernelArgs(vector);
+      expect(runBendNat(`K.ta_gain_c(${args})`)).toBe(gain);
+      expect(runBendNat(`K.ta_loss_c(${args})`)).toBe(loss);
+    }
+  });
+
+  it("TA P&L gate matches the Bend gate (off/on, unknown ratio, floor) (#237)", () => {
+    const cases = [
+      {
+        require: false,
+        net: -1,
+        ratio: null,
+        bend: "K.ta_pnl_gate(False{}, False{}, False{}, 2000n, 120n)",
+      },
+      {
+        require: true,
+        net: 1,
+        ratio: null,
+        bend: "K.ta_pnl_gate(True{}, True{}, False{}, 0n, 120n)",
+      },
+      {
+        require: true,
+        net: -1,
+        ratio: null,
+        bend: "K.ta_pnl_gate(True{}, False{}, False{}, 2000n, 120n)",
+      },
+      {
+        require: true,
+        net: Number.NaN,
+        ratio: null,
+        bend: "K.ta_pnl_gate(True{}, False{}, False{}, 2000n, 120n)",
+      },
+      {
+        require: true,
+        net: -1,
+        ratio: 1.2,
+        bend: "K.ta_pnl_gate(True{}, False{}, True{}, 120n, 120n)",
+      },
+      {
+        require: true,
+        net: -1,
+        ratio: 1.19,
+        bend: "K.ta_pnl_gate(True{}, False{}, True{}, 119n, 120n)",
+      },
+    ];
+    for (const c of cases) {
+      expect(runBendBool(c.bend)).toBe(tsTaGate(c.require, c.net, c.ratio));
+    }
+  });
+
+  it("TA reasoning label matches the Bend label kernel (#237)", () => {
+    const cases = [
+      { net: 1, bend: "K.ta_label(0n, True{})" },
+      { net: 0, bend: "K.ta_label(0n, True{})" },
+      { net: -1, bend: "K.ta_label(100n, True{})" },
+      { net: Number.NaN, bend: "K.ta_label(0n, False{})" },
+    ];
+    for (const c of cases) {
+      expect(runBendNat(c.bend)).toBe(BigInt(tsTaLabelCode(c.net)));
+    }
+  });
+
+  it("TA hold floor matches the Bend hold kernel (#237)", () => {
+    const cases = [
+      { age: 0, floor: 0, bend: "K.ta_hold_ok(0n, 0n)" },
+      { age: 0, floor: 1, bend: "K.ta_hold_ok(0n, 1n)" },
+      { age: 1, floor: 1, bend: "K.ta_hold_ok(1n, 1n)" },
+      { age: 2, floor: 1, bend: "K.ta_hold_ok(2n, 1n)" },
+    ];
+    for (const c of cases) {
+      expect(runBendBool(c.bend)).toBe(tsTaHoldVotes(c.age, c.floor));
+    }
+  });
+
+  it("TA RSI threshold matches the strict-overbought kernel (#237)", () => {
+    const at90 = taExhaustionSignals(TA_TRIGGER_CLOSES, 90);
+    const at100 = taExhaustionSignals(TA_TRIGGER_CLOSES, 100);
+    expect(runBendBool("K.ta_rsi_trips(100n, 90n)")).toBe(at90?.rsiOverbought);
+    expect(runBendBool("K.ta_rsi_trips(100n, 100n)")).toBe(at100?.rsiOverbought);
+    expect(runBendBool("K.ta_rsi_trips(90n, 90n)")).toBe(false);
+    expect(runBendBool("K.ta_rsi_trips(91n, 90n)")).toBe(true);
   });
 
   // Spec mirror of the decidePositionExit chain shape (program.ts:10959-10970

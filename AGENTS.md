@@ -362,18 +362,22 @@ Veto-fetch failures log the underlying gateway error (Effect wraps rejections in
 
 - **The gate is `bun run verify`** (`scripts/verify.sh`): the toolchain matrix
   (`check:toolchain`), typecheck + lint + format, the full vitest suite, `bend PROOF.bend`, TLC on
-  every fixed config (`LedgerFixed`, `PolicyFixed`, `ResilienceFixed`), and TLC on every buggy config
-  (`LedgerBuggy`, `PolicyBuggy`, `ResilienceBuggy`) which **must fail**. The buggy configs are the
-  negative controls — if one ever passes, the model stopped detecting the regression it exists for.
-  A change that cannot pass all gates is not done.
+  every fixed config (`LedgerFixed`, `PolicyFixed`, `TaExhaustionFixed`, `TaExhaustionWin`,
+  `TaExhaustionToxic`, `ResilienceFixed`), and TLC on every buggy config (`LedgerBuggy`,
+  `PolicyBuggy`, `TaExhaustionBuggy`, `ResilienceBuggy`) which **must fail**. The buggy configs are
+  the negative controls — if one ever passes, the model stopped detecting the regression it exists
+  for. A change that cannot pass all gates is not done.
 - Formal assets: `native/bend/{kernels,LAWS,PROOF}.bend` (strategy + PnL + selection + hold +
-  entry-momentum laws, proved by closed evaluation; a wrong constant makes `bend` exit 1) and
-  `native/tla/`: `Ledger.tla` (accounting + rolling halt), `Policy.tla` (EXIT/HOLD/ROTATE decision
-  table, 10,648 observations) and `Resilience.tla` (RPC retry budget + circuit breaker: only
-  transient errors strike, retries are bounded, an open breaker never calls). Each has a fixed config
-  that must pass and a buggy config that must fail — the buggy configs are the regression each model
-  exists for. Bend's `Nat` is unary: keep kernel arithmetic in small units (hours, not seconds) or
-  the prover will not finish.
+  TA-exhaustion policy + entry-momentum laws, proved by closed evaluation; a wrong constant makes
+  `bend` exit 1) and `native/tla/`: `Ledger.tla` (accounting + rolling halt), `Policy.tla`
+  (EXIT/HOLD/ROTATE decision table, 10,648 observations), `TaExhaustion.tla` (the TA gate's temporal
+  contract: no unqualified loss close — a measured fee/IL above the floor is the only exception and
+  the gate defaults off — plus the hold floor, honest-gate liveness, and a must-fail pre-#237
+  control), and `Resilience.tla` (RPC retry budget + circuit breaker: only transient errors strike,
+  retries are bounded, an open breaker never calls). Each has a fixed config that must pass and a
+  buggy config that must fail — the buggy configs are the regression each model exists for. Bend's
+  `Nat` is unary: keep kernel arithmetic in small units (hours, not seconds) or the prover will not
+  finish.
 - Add a law/spec **before or with** a policy change, not after: the negative-control config is what
   proves the model still detects the failure it was written for.
 - Engine tests live in `bench/**/*.test.ts`. There is no `tests/` directory for the engine.
@@ -488,6 +492,11 @@ The `Dockerfile` builds the engine bundle with `oven/bun:1.4.5-slim`, using a se
 | `ENTRY_MOMENTUM_SCORE_WEIGHT` | `0.15`                                                   | Weight of the bounded momentum term in `weightedEntryScore` (positive drift only; negative contributes 0). |
 | `TAKE_PROFIT_ENABLED` | `false`                                                      | Normal-lane take-profit (winrate): at ENTER, build a single-rung TP ladder (`TAKE_PROFIT_PCT` above entry); a deterministic `[tp-target]` EXIT (confidence 1) fires when the price reaches the rung — BEFORE the loss-side exits. Paper-first. |
 | `TAKE_PROFIT_PCT` | `0.15`                                                         | TP rung distance above the entry price. |
+| `TA_EXHAUSTION_ENABLED` | `true`                                                   | Master switch for the TA-exhaustion EXIT (`[ta-exhaustion]`: RSI(2) > threshold with BB-upper / first-MACD-green confluence). The default preserves the pre-#237 always-on behavior; `false` removes the gate entirely. The reasoning is P&L-honest — it says `profit-exhaustion` only when the projected realized P&L (mark + claimed fees/rewards − basis − modeled close costs) is ≥ 0, and `losing position` otherwise. |
+| `TA_EXHAUSTION_RSI_THRESHOLD` | `90`                                                | Strict RSI(2) overbought trip line, clamped [50, 100]. |
+| `TA_EXHAUSTION_MIN_HOLD_MS` | `0`                                                   | Minimum position age before the TA-exhaustion EXIT may fire; `0` disables. The #237 forensics: RSI(2) was already > 90 at entry, so exits fired 10–42 minutes in, before fees could cover the round trip. |
+| `TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL` | `false`                                    | Behavior-changing opt-in: when on, the exit fires only when projected realized P&L ≥ 0 OR the MEASURED fee/IL ratio clears `TA_EXHAUSTION_MIN_FEE_IL_RATIO`. Modeled/unknown ratios fail closed. Off = pre-#237 behavior. |
+| `TA_EXHAUSTION_MIN_FEE_IL_RATIO` | `1.2`                                             | Fee/IL floor for the P&L gate's alternative leg; only a measured (datapi) ratio can satisfy it. |
 | `BACKTEST_TOLERATE_EMPTY_BINS` | `true`                                                 | Backtest replay fidelity: empty-bin snapshots (the paper DB stores `bins:[]` for every row) degrade bin-utilization to UNKNOWN (skip the requirement) instead of 0 (reject every tick). False = parity with the pre-fix replay. |
 | `VOLATILITY_LOOKBACK_SNAPSHOTS` | (existing)                                             | Recent-bin window length — the drift signal's lookback. |
 | `MARKET_SCAN_TOP_K`           | `30`                                                               | How many top-ranked market pools are actively scanned each cycle (1–200).                                           |

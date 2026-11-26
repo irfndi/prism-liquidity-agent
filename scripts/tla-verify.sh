@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # TLA+ verification: the ledger/halt model, the EXIT/HOLD/ROTATE policy model,
-# and the RPC retry/circuit-breaker model — each with the negative control that
-# proves the model still detects the defect it was written for.
+# the RPC retry/circuit-breaker model, and the TA-exhaustion gate model — each
+# with the negative control that proves the model still detects the defect it
+# was written for. (Also called by scripts/verify.sh.)
 #
 # Standalone (`bun run verify:tla`) and called by scripts/verify.sh.
 set -euo pipefail
@@ -78,6 +79,41 @@ if ! grep -q "Invariant NoEconomicExitOnPositiveCarry is violated" "$WORK/policy
 fi
 echo "ok: buggy policy exits a positive-carry position (the 2026-11 hold-bias defect)"
 
+# ── TA-exhaustion gate (#237) ───────────────────────────────────────────────
+run_ta_pass() {
+  local cfg="$1"
+  local label="$2"
+  local log="$WORK/tlc-ta-${cfg%.cfg}.log"
+  echo "== TLA+ TA-exhaustion ${label} (must pass) =="
+  if ! (cd "$TLA_DIR" && "${TLC[@]}" -config "$cfg" TaExhaustion.tla > "$log" 2>&1); then
+    echo "FAIL: TA-exhaustion ${label} violated an invariant or liveness property"
+    tail -n 30 "$log"
+    exit 1
+  fi
+  echo "ok: TA-exhaustion ${label} holds"
+}
+
+run_ta_pass TaExhaustionFixed.cfg "fixed losing gate"
+run_ta_pass TaExhaustionWin.cfg "profitable liveness"
+run_ta_pass TaExhaustionToxic.cfg "measured fee/IL alternative"
+
+echo "== TLA+ TA-exhaustion buggy model (must fail) =="
+set +e
+(cd "$TLA_DIR" && "${TLC[@]}" -config TaExhaustionBuggy.cfg TaExhaustion.tla > "$WORK/tlc-ta-buggy.log" 2>&1)
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: the buggy TA-exhaustion model passed — the model cannot detect the #237 regression"
+  exit 1
+fi
+if ! grep -q "Invariant NoLossTaClose is violated" "$WORK/tlc-ta-buggy.log"; then
+  echo "FAIL: the buggy TA-exhaustion model failed for the wrong reason (exit $rc)"
+  tail -n 30 "$WORK/tlc-ta-buggy.log"
+  exit 1
+fi
+echo "ok: buggy TA-exhaustion model violates NoLossTaClose (the #237 regression, model-checked)"
+
+# ── RPC resilience (retry budget + circuit breaker) ─────────────────────────
 echo "== TLA+ resilience model (must pass) =="
 (cd "$TLA_DIR" && "${TLC[@]}" -config ResilienceFixed.cfg Resilience.tla > "$WORK/resilience-fixed.log" 2>&1) || {
   echo "FAIL: resilience model violated an invariant"

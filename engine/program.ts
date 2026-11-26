@@ -93,7 +93,13 @@ import {
   feeStarvationReasoning,
 } from "./max-position-age.js";
 import { taggedExitReason } from "./exit-reason.js";
-import { maybeTaExhaustionExit, TA_EXHAUSTION_MIN_POINTS } from "./ta-exhaustion.js";
+import {
+  maybeTaExhaustionExit,
+  resolveTaExhaustionPolicy,
+  TA_EXHAUSTION_MIN_POINTS,
+  taExhaustionNetPnlUsd,
+  taExhaustionVote,
+} from "./ta-exhaustion.js";
 import {
   gateAndRankLaunchPools,
   summarizeLaunchRejections,
@@ -905,6 +911,11 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Bound on the TA-exhaustion pending-income reads: a stalled RPC must never
+ *  hold the TA vote (and the loss-side exits queued behind it); a timeout is
+ *  treated as unknown, never zero. */
+const TA_PENDING_READ_TIMEOUT = "2 seconds";
 
 /**
  * Paper notional-fee accrual for one cycle (A4 paper/live parity). A paper
@@ -6629,6 +6640,9 @@ export const program = Effect.gen(function* () {
     ...(config.feeCaptureConversionCostPct !== undefined
       ? { feeCaptureConversionCostPct: config.feeCaptureConversionCostPct }
       : undefined),
+    ...(config.harvestTxCostUsdEst !== undefined
+      ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
+      : undefined),
     rebalanceCostUsd: config.rebalanceGasCostSol * config.solPriceUsd,
     debitPaperCash: (sizeUsd: number): void => {
       if (finiteNonNegativeNumber(sizeUsd)) paperCashUsd -= sizeUsd;
@@ -10750,6 +10764,10 @@ export const program = Effect.gen(function* () {
           const fallbackMark = paperMark ?? estimatePositionValue(pos, pool);
           const estimatedValue = realMark !== null ? realMark : fallbackMark;
           pos.currentValueUsd = estimatedValue;
+          // Provenance for P&L-gated exits: a live fallback (HODL/deposit) is
+          // NOT a valuation of what a close would withdraw, while paper's
+          // fallback is exactly the mark its settlement books.
+          pos.valueMarkKnown = realMark !== null || pos.positionPubKey == null;
           const highest = pos.highestValueUsd ?? pos.depositedUsd;
           if (estimatedValue > highest) {
             pos.highestValueUsd = estimatedValue;
@@ -11261,6 +11279,8 @@ export const program = Effect.gen(function* () {
         ilDominance: IlDominanceSignal | null,
       ): Effect.Effect<AgentDecision | null, Error> {
         function readTaCloses(): Effect.Effect<readonly number[], Error> {
+          // A disabled gate needs no price-history read (TA_EXHAUSTION_ENABLED).
+          if ((config.taExhaustionEnabled ?? true) !== true) return Effect.succeed([]);
           return Effect.gen(function* () {
             // TA closes feed: current_price history over a window sized for
             // TA_EXHAUSTION_MIN_POINTS closes with 2x slack for missed cycles;
@@ -11292,10 +11312,11 @@ export const program = Effect.gen(function* () {
           const taCloses = yield* readTaCloses();
           const lifecycleExit = checkLifecycleExit();
           if (lifecycleExit) return lifecycleExit;
-          // TA-exhaustion EXIT (profit-exhaustion before loss-side gates):
-          // RSI(2)>90 + BB-upper/MACD-green confluence over current_price
-          // history; fail-open null when cold/junk (never throws).
-          const taExit = checkTaExhaustionExit(taCloses, pos);
+          // TA-exhaustion EXIT (#237): RSI(2) confluence over current_price
+          // history. The reasoning is P&L-honest (projected realized net of
+          // modeled close costs) and the rule is config-gated; defaults keep
+          // the pre-#237 behavior. Fail-open null when cold/junk.
+          const taExit = yield* checkTaExhaustionExit(taCloses, pos);
           if (taExit) return taExit;
           if (w15Signals.depeg || w15Signals.liquidityDrain) {
             return conf1PositionExit(
@@ -11303,14 +11324,133 @@ export const program = Effect.gen(function* () {
               buildW15ExitReasoning(w15Signals.depeg, w15Signals.liquidityDrain),
             );
           }
+          function taPolicy() {
+            return resolveTaExhaustionPolicy({
+              enabled: config.taExhaustionEnabled,
+              rsiThreshold: config.taExhaustionRsiThreshold,
+              minHoldMs: config.taExhaustionMinHoldMs,
+              requireNonnegativePnl: config.taExhaustionRequireNonnegativePnl,
+              minFeeIlRatio: config.taExhaustionMinFeeIlRatio,
+            });
+          }
+          // Mirror the EXIT execution dispatch: live mode always uses live
+          // accounting, and paper mode's PAPER_MODE_EXIT_LIVE hybrid uses it for
+          // a live-identity position. The projection must price the close the
+          // selected executor will actually run.
+          function taLiveAccounting(position: PositionRecord): boolean {
+            return (
+              !config.paperTrading ||
+              (config.paperModeExitLive === true && position.positionPubKey !== null)
+            );
+          }
+          // Paper settlement debits the modeled costs of every prior rebalance
+          // (paperRebalanceCostsUsd over the position's REBALANCE events), so
+          // the projection must debit them too. A live-executed close does not
+          // charge them; a read failure matches the close path (caught → 0).
+          function readTaRebalanceCosts(position: PositionRecord): Effect.Effect<number, never> {
+            if (taLiveAccounting(position)) return Effect.succeed(0);
+            return db.getPositionEvents(poolAddress).pipe(
+              Effect.map((events) => paperRebalanceCostsUsd(events, position.positionId)),
+              Effect.catch(() => Effect.succeed(0)),
+            );
+          }
+          // A live close withdraws pending swap fees and sweeps pending LM
+          // rewards; the mark (position holdings) includes neither. Reads are
+          // bounded so a stalled RPC can never hold the TA vote (and the
+          // loss-side exits queued behind it); a timeout or failed read is
+          // unknown (NaN), never zero.
+          function readTaPendingFeesUsd(position: PositionRecord): Effect.Effect<number, never> {
+            if (!taLiveAccounting(position) || position.positionPubKey === null) {
+              return Effect.succeed(0);
+            }
+            const read = adapter.getClaimableFeesUsd;
+            if (read === undefined) return Effect.succeed(Number.NaN);
+            return read(poolAddress, position.positionPubKey).pipe(
+              Effect.timeout(TA_PENDING_READ_TIMEOUT),
+              Effect.map((usd) => (usd === null ? Number.NaN : usd)),
+              Effect.catch(() => Effect.succeed(Number.NaN)),
+            );
+          }
+          function readTaPendingRewardsUsd(position: PositionRecord): Effect.Effect<number, never> {
+            if (!taLiveAccounting(position) || position.positionPubKey === null) {
+              return Effect.succeed(0);
+            }
+            const read = adapter.getClaimableRewardsUsd;
+            if (read === undefined) return Effect.succeed(Number.NaN);
+            return read(poolAddress, position.positionPubKey).pipe(
+              Effect.timeout(TA_PENDING_READ_TIMEOUT),
+              Effect.map((usd) => (usd === null ? Number.NaN : usd)),
+              Effect.catch(() => Effect.succeed(Number.NaN)),
+            );
+          }
+          // A Token-2022 transfer-fee leg makes the mark/pending USD (gross
+          // amounts) differ from the close withdrawal (exclude-transfer-fee
+          // amounts). Mint authorities are cached; a fee leg or an unreadable
+          // mint makes the projection unknown rather than guessing a sign.
+          function readTaNetAmountsKnown(position: PositionRecord): Effect.Effect<boolean, never> {
+            if (!taLiveAccounting(position)) return Effect.succeed(true);
+            return Effect.all(
+              [adapter.getMintAuthorities(pool.tokenX), adapter.getMintAuthorities(pool.tokenY)],
+              { concurrency: 2 },
+            ).pipe(
+              Effect.map(
+                ([x, y]) => x.transferFeeEnabled !== true && y.transferFeeEnabled !== true,
+              ),
+              Effect.catch(() => Effect.succeed(false)),
+            );
+          }
           function checkTaExhaustionExit(
             closes: readonly number[],
             position: PositionRecord,
-          ): AgentDecision | null {
-            return maybeTaExhaustionExit({
-              poolAddress,
-              positionId: position.positionId,
-              closes,
+          ): Effect.Effect<AgentDecision | null, never> {
+            return Effect.gen(function* () {
+              const policy = taPolicy();
+              const ageMs = Math.max(Date.now() - position.timestamp, 0);
+              // Pure preflight: the per-position DB/SDK reads below only run
+              // when the confluence would actually vote.
+              if (taExhaustionVote({ closes, ageMs, policy }) === null) return null;
+              const liveAccounting = taLiveAccounting(position);
+              const rebalanceCostsUsd = yield* readTaRebalanceCosts(position);
+              const [pendingFeesUsd, pendingRewardsUsd, netAmountsKnown] = yield* Effect.all(
+                [
+                  readTaPendingFeesUsd(position),
+                  readTaPendingRewardsUsd(position),
+                  readTaNetAmountsKnown(position),
+                ],
+                { concurrency: 3 },
+              );
+              return maybeTaExhaustionExit({
+                poolAddress,
+                positionId: position.positionId,
+                closes,
+                ageMs,
+                netPnlUsd: taExhaustionNetPnlUsd({
+                  depositedUsd: position.depositedUsd,
+                  currentValueUsd: position.currentValueUsd,
+                  cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
+                  cumulativeRewardsClaimedUsd: position.cumulativeRewardsClaimedUsd,
+                  pendingFeesUsd,
+                  pendingRewardsUsd,
+                  rebalanceCostsUsd,
+                  markKnown: position.valueMarkKnown === true,
+                  // A live row without a measured entry overhead settles as
+                  // NULL (exitOverheadUnknown); its projection is unknown too.
+                  entryOverheadKnown:
+                    !(liveAccounting && position.positionPubKey !== null) ||
+                    position.entryOverheadUsd != null,
+                  transferFeeKnown: netAmountsKnown,
+                  ageMs,
+                  paperTrading: !liveAccounting,
+                  swapCostPct: config.runnerSwapCostPct,
+                  harvestCostUsd: config.feeCaptureHarvestCostUsd,
+                  conversionCostPct: config.feeCaptureConversionCostPct,
+                  txCostUsd: config.harvestTxCostUsdEst,
+                }),
+                // Modeled fee/IL (gecko/heuristic) can never satisfy the gate's
+                // alternative leg — same known-flag split as every other consumer.
+                feeIlRatio: metrics.feeIlRatioKnown ? feeIlRatio : null,
+                policy,
+              });
             });
           }
           function checkIlDominanceExit(): Effect.Effect<AgentDecision | null, Error> {
