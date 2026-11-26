@@ -363,9 +363,14 @@ Veto-fetch failures log the underlying gateway error (Effect wraps rejections in
   suite, `bend PROOF.bend`, TLC on `native/tla/LedgerFixed.cfg`, and TLC on `LedgerBuggy.cfg` which
   **must fail**. Gate 5 is the negative control — if the buggy model ever passes, the model stopped
   detecting the regression it exists for. A change that cannot pass all five is not done.
-- Formal assets: `native/bend/{kernels,LAWS,PROOF}.bend` (strategy + PnL laws, proved by closed
-  evaluation; a wrong constant makes `bend` exit 1) and `native/tla/{Ledger.tla,*.cfg}` (ledger and
-  halt state machine). Add a law/spec when you change a gate that a law covers, not after.
+- Formal assets: `native/bend/{kernels,LAWS,PROOF}.bend` (strategy + PnL + selection + hold laws,
+  proved by closed evaluation; a wrong constant makes `bend` exit 1) and `native/tla/`:
+  `Ledger.tla` (accounting + rolling halt) and `Policy.tla` (EXIT/HOLD/ROTATE decision table,
+  10,648 observations). Each has a fixed config that must pass and a buggy config that must fail —
+  the buggy configs are the regression each model exists for. Bend's `Nat` is unary: keep kernel
+  arithmetic in small units (hours, not seconds) or the prover will not finish.
+- Add a law/spec **before or with** a policy change, not after: the negative-control config is what
+  proves the model still detects the failure it was written for.
 - Engine tests live in `bench/**/*.test.ts`. There is no `tests/` directory for the engine.
 - Engine tests **require Bun**. `vitest.config.ts` throws a clear error if `typeof Bun === "undefined"`.
 - Most engine tests build isolated Effect layers, e.g. `Layer.merge(AuditLive, DbLive(":memory:"))`.
