@@ -86,6 +86,14 @@ export interface PositionRecord {
   valuationAnchorPriceUsd?: number | null;
   valuationAnchorBinId?: number | null;
   valuationAnchorValueUsd?: number | null;
+  /**
+   * Cash spent at entry BEYOND the deposit — position/bin-array/ATA rent,
+   * entry tx fee, wSOL wrap rent — measured from the wallet delta around the
+   * entry transaction. It comes back as a rent refund inside the measured
+   * exit delta, so the exit subtracts it to keep both sides of realized PnL
+   * deposit-only. NULL on legacy rows → no subtraction (old behaviour).
+   */
+  entryOverheadUsd?: number | null | undefined;
 }
 
 export type PositionEventType = "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
@@ -247,8 +255,9 @@ export const DbLive = (dbPath?: string) =>
               closed_at, realized_pnl_usd,
               position_mode, tp_ladder_json, invalidation_stop_price, launch_runner,
               launch_runner_steps, launch_runner_anchor_price,
-              valuation_anchor_price_usd, valuation_anchor_bin_id, valuation_anchor_value_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              valuation_anchor_price_usd, valuation_anchor_bin_id, valuation_anchor_value_usd,
+              entry_overhead_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(position_id) DO UPDATE SET
               pool_address = excluded.pool_address,
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
@@ -299,6 +308,10 @@ export const DbLive = (dbPath?: string) =>
               valuation_anchor_value_usd = COALESCE(
                 excluded.valuation_anchor_value_usd,
                 positions.valuation_anchor_value_usd
+              ),
+              entry_overhead_usd = COALESCE(
+                excluded.entry_overhead_usd,
+                positions.entry_overhead_usd
               )`,
               pos.positionId,
               pos.poolAddress,
@@ -336,6 +349,7 @@ export const DbLive = (dbPath?: string) =>
               orNull(pos.valuationAnchorPriceUsd),
               orNull(pos.valuationAnchorBinId),
               orNull(pos.valuationAnchorValueUsd),
+              orNull(pos.entryOverheadUsd),
             );
           }),
 
@@ -1774,6 +1788,7 @@ function rowToPosition(row: DbRow): PositionRecord {
     valuationAnchorPriceUsd: nullableNumberColumn(row.valuation_anchor_price_usd),
     valuationAnchorBinId: nullableNumberColumn(row.valuation_anchor_bin_id),
     valuationAnchorValueUsd: nullableNumberColumn(row.valuation_anchor_value_usd),
+    entryOverheadUsd: nullableNumberColumn(row.entry_overhead_usd),
     tpLadderJson: nullableTextColumn(row.tp_ladder_json),
     invalidationStopPrice: nullableNumberColumn(row.invalidation_stop_price),
   };

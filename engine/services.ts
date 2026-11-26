@@ -306,6 +306,11 @@ export interface AdapterApi {
       depositMode: EntryDepositMode;
       amountXUsd: number;
       amountYUsd: number;
+      /**
+       * Cash spent beyond the deposit (rent + entry fee + wrap), measured from
+       * the wallet delta around the entry tx. `null` when unmeasurable.
+       */
+      entryOverheadUsd?: number | null | undefined;
     },
     Error
   >;
@@ -344,12 +349,25 @@ export interface AdapterApi {
   readonly exitPosition: (
     poolAddress: string,
     positionPubKey: string,
+    options?: {
+      /**
+       * Cash spent at entry beyond the deposit (rent + entry fee + wrap). It
+       * returns inside the measured withdrawal delta as a rent refund, so the
+       * adapter subtracts it to keep realized PnL deposit-only. Absent → no
+       * subtraction (legacy rows).
+       */
+      entryOverheadUsd?: number | undefined;
+    },
   ) => Effect.Effect<
     {
       txSignature: string;
       withdrawnXAtomic?: string | undefined;
       withdrawnYAtomic?: string | undefined;
+      /** Deposit-only realized value: gross measured withdrawal − entry overhead. */
       withdrawnUsd?: number | null | undefined;
+      /** The raw measured withdrawal before the entry-overhead subtraction. */
+      grossWithdrawnUsd?: number | null | undefined;
+      entryOverheadUsd?: number | undefined;
       pendingFeeXAtomic?: string | undefined;
       pendingFeeYAtomic?: string | undefined;
       pendingFeeUsd?: number | null | undefined;
@@ -954,6 +972,8 @@ export interface DbApi {
     valuationAnchorPriceUsd?: number | null;
     valuationAnchorBinId?: number | null;
     valuationAnchorValueUsd?: number | null;
+    /** Cash spent beyond the deposit (rent + entry fee + wrap). */
+    entryOverheadUsd?: number | null | undefined;
   }) => Effect.Effect<void, Error>;
   readonly getPosition: (positionId: string) => Effect.Effect<
     {
@@ -993,6 +1013,7 @@ export interface DbApi {
       valuationAnchorPriceUsd?: number | null;
       valuationAnchorBinId?: number | null;
       valuationAnchorValueUsd?: number | null;
+      entryOverheadUsd?: number | null | undefined;
     } | null,
     Error
   >;
@@ -1034,6 +1055,7 @@ export interface DbApi {
       valuationAnchorPriceUsd?: number | null;
       valuationAnchorBinId?: number | null;
       valuationAnchorValueUsd?: number | null;
+      entryOverheadUsd?: number | null | undefined;
     }>,
     Error
   >;
@@ -1075,6 +1097,7 @@ export interface DbApi {
       valuationAnchorPriceUsd?: number | null;
       valuationAnchorBinId?: number | null;
       valuationAnchorValueUsd?: number | null;
+      entryOverheadUsd?: number | null | undefined;
     }>,
     Error
   >;
@@ -1129,6 +1152,7 @@ export interface DbApi {
       valuationAnchorPriceUsd?: number | null;
       valuationAnchorBinId?: number | null;
       valuationAnchorValueUsd?: number | null;
+      entryOverheadUsd?: number | null | undefined;
     }>,
     Error
   >;

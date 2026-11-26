@@ -1043,6 +1043,23 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 26,
+    name: "entry_overhead_usd",
+    up(db) {
+      // Cash spent at entry BEYOND the deposit: position/bin-array/ATA rent,
+      // entry tx fee, wSOL wrap rent. Those come back on close as a rent
+      // refund inside the measured wallet delta, so without this the exit
+      // books refunded rent as trading profit — a flat round trip read as
+      // +16% on a $20 position (live forensics, 2026-11-26). The exit path
+      // subtracts this from `withdrawnUsd` so both sides of realized PnL are
+      // deposit-only. Legacy rows stay NULL (no overhead recorded -> the old
+      // behaviour, never a fabricated credit).
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "entry_overhead_usd")) {
+        db.exec("ALTER TABLE positions ADD COLUMN entry_overhead_usd REAL");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

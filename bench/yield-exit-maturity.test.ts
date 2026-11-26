@@ -51,7 +51,10 @@ function makeLayer(opts: { positionAgeMs: number; minYieldExitAgeMs?: number }) 
   });
 }
 
-async function runCycle(opts: { positionAgeMs: number; minYieldExitAgeMs?: number }) {
+async function runCycle(
+  opts: { positionAgeMs: number; minYieldExitAgeMs?: number },
+  done: (decisions: ReadonlyArray<DecisionRow>) => boolean = (decisions) => decisions.length > 0,
+) {
   const layer = makeLayer(opts);
   const test = Effect.gen(function* () {
     const db = yield* DbService;
@@ -89,8 +92,23 @@ async function runCycle(opts: { positionAgeMs: number; minYieldExitAgeMs?: numbe
         currentValueUsd: 1_000,
       }),
     );
-    yield* Effect.raceFirst(program, Effect.sleep(2_500));
+    // Decision-driven wait: a fixed sleep races the scan loop under parallel
+    // load (the 2026-11-26 flake). `raceFirst` runs the loop against a poller
+    // that resolves as soon as the caller's condition holds, and interrupts
+    // the loop — no leaked fiber, no fixed budget on the happy path.
     const audit = yield* AuditService;
+    const waitForDecision = Effect.gen(function* () {
+      for (let attempt = 0; attempt < 240; attempt += 1) {
+        const rows = asOwner<ReadonlyArray<DecisionRow>>(yield* audit.getRecentDecisions(200));
+        if (done(rows)) return true;
+        yield* Effect.sleep(50);
+      }
+      return true;
+    });
+    // `program` may finish after a single cycle, so this race is a WAIT, not
+    // the result source: whichever arm ends first, the audit trail below is
+    // the single source of truth.
+    yield* Effect.raceFirst(program, waitForDecision);
     const decisions = yield* audit.getRecentDecisions(200);
     return asOwner<ReadonlyArray<DecisionRow>>(decisions);
   });
@@ -99,7 +117,6 @@ async function runCycle(opts: { positionAgeMs: number; minYieldExitAgeMs?: numbe
     asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
   )) as ReadonlyArray<DecisionRow>;
 }
-
 describe("economic-exit maturity gate", () => {
   it("an immature position (33-min hold, fee/IL < 0.5) does NOT exit", async () => {
     const decisions = await runCycle({ positionAgeMs: 33 * 60_000 });
@@ -108,7 +125,9 @@ describe("economic-exit maturity gate", () => {
   }, 15_000);
 
   it("a mature position (13h hold) with fee/IL < 0.5 DOES exit", async () => {
-    const decisions = await runCycle({ positionAgeMs: 13 * 3_600_000 });
+    const decisions = await runCycle({ positionAgeMs: 13 * 3_600_000 }, (rows) =>
+      rows.some((d) => d.reasoning.includes("Fee/IL ratio")),
+    );
     const feeIlExit = decisions.find((d) => d.reasoning.includes("Fee/IL ratio"));
     expect(feeIlExit, "a mature low-yield position should exit").toBeDefined();
     expect(feeIlExit?.confidence).toBe(0.75);
@@ -116,7 +135,9 @@ describe("economic-exit maturity gate", () => {
   }, 15_000);
 
   it("a config override can keep the gate open (minYieldExitAgeMs=0)", async () => {
-    const decisions = await runCycle({ positionAgeMs: 60_000, minYieldExitAgeMs: 0 });
+    const decisions = await runCycle({ positionAgeMs: 60_000, minYieldExitAgeMs: 0 }, (rows) =>
+      rows.some((d) => d.reasoning.includes("Fee/IL ratio")),
+    );
     const feeIlExit = decisions.find((d) => d.reasoning.includes("Fee/IL ratio"));
     expect(feeIlExit, "explicitly zero age floor restores legacy behavior").toBeDefined();
   }, 15_000);
