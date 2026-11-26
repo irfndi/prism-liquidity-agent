@@ -232,5 +232,101 @@ def break_even_days(+cost_bps: Nat, +apr_bps: Nat) -> Nat:
 def entry_overhead_c(+spent_c: Nat, +deposit_c: Nat) -> Nat:
   Nat.sub(spent_c, deposit_c)
 
+# ── TA-exhaustion projected P&L + policy (#237) ─────────────────────────────
+# Ported from engine/ta-exhaustion.ts `taExhaustionNetPnlUsd`,
+# `taExhaustionPnlGateSatisfied`, `taExhaustionVote` and the reasoning label.
+# Units: whole US cents (Nat), same as the PnL block above. Nat has no
+# negatives, so the projected net is a gain/loss magnitude pair; exactly one is
+# non-zero. Unknown inputs (fallback mark, unreadable pending fees) are a Bool
+# `known` that zeroes the label — the TS returns NaN, never a fabricated 0.
+#
+# The label is 0n = projected P&L unknown, 1n = losing position,
+# 2n = profit-exhaustion. A break-even net (loss 0) labels profit, matching the
+# TS `netPnlUsd >= 0` condition.
+
+# Projected income the close credits: mark + claimed fees + rewards + pending.
+def ta_income_c(+mark_c: Nat, +fees_c: Nat, +rewards_c: Nat, +pending_c: Nat) -> Nat:
+  Nat.add(Nat.add(mark_c, fees_c), Nat.add(rewards_c, pending_c))
+
+# Projected outgo the close debits: basis + prior paper rebalance + close costs.
+def ta_outgo_c(+deposit_c: Nat, +rebalance_c: Nat, +close_c: Nat) -> Nat:
+  Nat.add(deposit_c, Nat.add(rebalance_c, close_c))
+
+def ta_gain_c(
+  +mark_c: Nat, +fees_c: Nat, +rewards_c: Nat, +pending_c: Nat,
+  +deposit_c: Nat, +rebalance_c: Nat, +close_c: Nat,
+) -> Nat:
+  Nat.sub(
+    ta_income_c(mark_c, fees_c, rewards_c, pending_c),
+    ta_outgo_c(deposit_c, rebalance_c, close_c),
+  )
+
+def ta_loss_c(
+  +mark_c: Nat, +fees_c: Nat, +rewards_c: Nat, +pending_c: Nat,
+  +deposit_c: Nat, +rebalance_c: Nat, +close_c: Nat,
+) -> Nat:
+  Nat.sub(
+    ta_outgo_c(deposit_c, rebalance_c, close_c),
+    ta_income_c(mark_c, fees_c, rewards_c, pending_c),
+  )
+
+# Mark provenance: the live on-chain mark AND readable pending fees. Either
+# unknown makes the projection unknown (fallback HODL/deposit is not a close).
+def ta_known(mark_known: Bool, pending_known: Bool) -> Bool:
+  Bool.and(mark_known, pending_known)
+
+# 0n unknown / 1n losing / 2n profit-exhaustion (net >= 0).
+def ta_label(+loss_c: Nat, known: Bool) -> Nat:
+  match loss_c:
+    case 0n:
+      match known:
+        case False{}:
+          0n
+        case True{}:
+          2n
+    case 1n+p:
+      match known:
+        case False{}:
+          0n
+        case True{}:
+          1n
+
+# Non-negative projected P&L requires a KNOWN projection with zero loss.
+def ta_nonnegative(known: Bool, +loss_c: Nat) -> Bool:
+  match known:
+    case False{}:
+      False{}
+    case True{}:
+      match loss_c:
+        case 0n:
+          True{}
+        case 1n+p:
+          False{}
+
+# TA_EXHAUSTION_REQUIRE_NONNEGATIVE_PNL: off -> always true; on -> nonnegative
+# OR a MEASURED fee/IL at/above the floor. Unknown (modeled) ratios can never
+# satisfy the alternative leg.
+def ta_pnl_gate(
+  require: Bool, nonnegative: Bool, ratio_known: Bool, +ratio: Nat, +floor: Nat,
+) -> Bool:
+  match require:
+    case False{}:
+      True{}
+    case True{}:
+      Bool.or(nonnegative, Bool.and(ratio_known, Nat.is_le(floor, ratio)))
+
+# TA_EXHAUSTION_MIN_HOLD_MS: at/above the floor passes; floor 0 always passes.
+def ta_hold_ok(+age_ms: Nat, +min_hold_ms: Nat) -> Bool:
+  Nat.is_le(min_hold_ms, age_ms)
+
+# TA_EXHAUSTION_RSI_THRESHOLD: strict overbought (rsi > threshold). A threshold
+# of 100 can never trip because RSI <= 100.
+def ta_rsi_trips(+rsi: Nat, +threshold: Nat) -> Bool:
+  Nat.is_lt(threshold, rsi)
+
+# Full TA vote: enabled AND mature AND confluence AND P&L policy.
+def ta_vote(enabled: Bool, hold_ok: Bool, confluent: Bool, pnl_ok: Bool) -> Bool:
+  Bool.and(enabled, Bool.and(hold_ok, Bool.and(confluent, pnl_ok)))
+
 def main() -> Nat:
   clamp_thr(1392n, 30n, 300n)

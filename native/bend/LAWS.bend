@@ -164,3 +164,114 @@ law entry_overhead_is_the_gap:
 
 law entry_overhead_never_negative:
   {K.entry_overhead_c(2000n, 2749n) == 0n : Nat}
+
+# 9. TA-exhaustion projected P&L (#237): the reasoning label and the opt-in
+# P&L gate must agree with the settlement-identical projection. Units are US
+# cents; a projected net is a (gain, loss) pair, exactly one non-zero.
+#
+# Inclusion: prior paper rebalance costs and live pending fees move the sign.
+law ta_rebalance_absent_is_gain:
+  {K.ta_gain_c(1011n, 0n, 0n, 0n, 1000n, 0n, 10n) == 1n : Nat}
+
+law ta_rebalance_cost_flips_to_loss:
+  {K.ta_loss_c(1011n, 0n, 0n, 0n, 1000n, 2n, 10n) == 1n : Nat}
+
+law ta_pending_fees_flip_to_gain:
+  {K.ta_gain_c(980n, 0n, 0n, 30n, 1000n, 0n, 5n) == 5n : Nat}
+
+law ta_without_pending_is_loss:
+  {K.ta_loss_c(980n, 0n, 0n, 0n, 1000n, 0n, 5n) == 25n : Nat}
+
+law ta_claimed_fees_and_rewards_credit:
+  {K.ta_gain_c(1000n, 10n, 2n, 0n, 1000n, 0n, 0n) == 12n : Nat}
+
+law ta_flat_net_is_no_loss:
+  {K.ta_loss_c(1000n, 0n, 0n, 0n, 1000n, 0n, 0n) == 0n : Nat}
+
+# Label honesty: a loss is never labeled profit (known or unknown); break-even
+# is profit (net >= 0); unknown provenance is unknown, never a sign.
+law ta_loss_label_never_profit:
+  for k: Bool
+  {Nat.is_lt(K.ta_label(25n, k), 2n) == True{} : Bool}
+
+law ta_label_loss_is_losing:
+  {K.ta_label(25n, True{}) == 1n : Nat}
+
+law ta_label_zero_loss_is_profit:
+  {K.ta_label(0n, True{}) == 2n : Nat}
+
+law ta_label_unknown_is_unknown:
+  {K.ta_label(25n, False{}) == 0n : Nat}
+
+# Provenance: either unknown input makes the projection unknown.
+law ta_known_requires_mark:
+  {K.ta_known(False{}, True{}) == False{} : Bool}
+
+law ta_known_requires_pending:
+  {K.ta_known(True{}, False{}) == False{} : Bool}
+
+law ta_known_when_both_present:
+  {K.ta_known(True{}, True{}) == True{} : Bool}
+
+# Non-negative requires known AND zero loss.
+law ta_nonnegative_zero_loss:
+  {K.ta_nonnegative(True{}, 0n) == True{} : Bool}
+
+law ta_loss_is_never_nonnegative:
+  for k: Bool
+  {K.ta_nonnegative(k, 25n) == False{} : Bool}
+
+# P&L gate: off is unconditional; on passes nonnegative OR a measured
+# ratio at/above the floor. Unknown ratios can never satisfy the OR.
+law ta_gate_off_never_blocks:
+  for r: Bool
+  {K.ta_pnl_gate(False{}, False{}, r, 2000n, 120n) == True{} : Bool}
+
+law ta_gate_nonnegative_passes_without_ratio:
+  {K.ta_pnl_gate(True{}, True{}, False{}, 0n, 120n) == True{} : Bool}
+
+law ta_gate_loss_ratio_at_floor_passes:
+  {K.ta_pnl_gate(True{}, False{}, True{}, 120n, 120n) == True{} : Bool}
+
+law ta_gate_loss_ratio_below_floor_fails:
+  {K.ta_pnl_gate(True{}, False{}, True{}, 119n, 120n) == False{} : Bool}
+
+law ta_gate_unknown_ratio_equals_nonnegative:
+  for n: Bool
+  {K.ta_pnl_gate(True{}, n, False{}, 2000n, 120n) == n : Bool}
+
+# Hold floor: at-floor passes, below-floor blocks, disabled passes.
+law ta_hold_disabled_passes:
+  {K.ta_hold_ok(0n, 0n) == True{} : Bool}
+
+law ta_hold_at_floor_passes:
+  {K.ta_hold_ok(3500n, 3500n) == True{} : Bool}
+
+law ta_hold_below_floor_blocks:
+  {K.ta_hold_ok(3499n, 3500n) == False{} : Bool}
+
+# Configurable RSI trip line: strict >, and threshold 100 never trips.
+law ta_rsi_strictly_above_trips:
+  {K.ta_rsi_trips(91n, 90n) == True{} : Bool}
+
+law ta_rsi_at_threshold_holds:
+  {K.ta_rsi_trips(90n, 90n) == False{} : Bool}
+
+law ta_rsi_threshold_100_never_trips:
+  {K.ta_rsi_trips(100n, 100n) == False{} : Bool}
+
+# The full vote requires every gate.
+law ta_vote_all_gates_fire:
+  {K.ta_vote(True{}, True{}, True{}, True{}) == True{} : Bool}
+
+law ta_vote_disabled_quiet:
+  {K.ta_vote(False{}, True{}, True{}, True{}) == False{} : Bool}
+
+law ta_vote_hold_gate_quiet:
+  {K.ta_vote(True{}, False{}, True{}, True{}) == False{} : Bool}
+
+law ta_vote_confluence_quiet:
+  {K.ta_vote(True{}, True{}, False{}, True{}) == False{} : Bool}
+
+law ta_vote_pnl_gate_quiet:
+  {K.ta_vote(True{}, True{}, True{}, False{}) == False{} : Bool}

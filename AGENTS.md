@@ -363,7 +363,7 @@ Veto-fetch failures log the underlying gateway error (Effect wraps rejections in
   suite, `bend PROOF.bend`, TLC on `native/tla/LedgerFixed.cfg`, and TLC on `LedgerBuggy.cfg` which
   **must fail**. Gate 5 is the negative control — if the buggy model ever passes, the model stopped
   detecting the regression it exists for. A change that cannot pass all five is not done.
-- Formal assets: `native/bend/{kernels,LAWS,PROOF}.bend` (strategy + PnL laws, proved by closed
+- Formal assets: `native/bend/{kernels,LAWS,PROOF}.bend` (strategy + PnL + TA-exhaustion policy laws, proved by closed
   evaluation; a wrong constant makes `bend` exit 1) and `native/tla/{Ledger.tla,*.cfg}` (ledger and
   halt state machine). Add a law/spec when you change a gate that a law covers, not after.
 - Engine tests live in `bench/**/*.test.ts`. There is no `tests/` directory for the engine.

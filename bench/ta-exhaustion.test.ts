@@ -5,7 +5,13 @@
  * config-driven with behavior-preserving defaults.
  */
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import {
+  computeBollingerPercentB,
+  computeBollingerUpper,
+  computeMacdHistogram,
+  computeRsi2,
+  isTaExhausted,
   maybeTaExhaustionExit,
   resolveTaExhaustionPolicy,
   taExhaustionNetPnlUsd,
@@ -139,6 +145,18 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
     expect(Number.isNaN(net)).toBe(true);
   });
 
+  it("treats a non-finite age as zero days instead of poisoning the projection", () => {
+    const net = taExhaustionNetPnlUsd({
+      depositedUsd: 1_000,
+      currentValueUsd: 1_000,
+      cumulativeFeesClaimedUsd: 0,
+      cumulativeRewardsClaimedUsd: 0,
+      ageMs: Number.NaN,
+      paperTrading: true,
+    });
+    expect(Number.isFinite(net)).toBe(true);
+  });
+
   it("the live model debits one exit swap leg plus gas (no conversion)", () => {
     const net = taExhaustionNetPnlUsd({
       depositedUsd: 1_000,
@@ -165,6 +183,61 @@ describe("TA-exhaustion projected P&L (net of modeled close costs)", () => {
       paperTrading: true,
     });
     expect(Number.isNaN(net)).toBe(true);
+  });
+});
+
+describe("TA indicator primitives", () => {
+  it("RSI(2): flat 50, all-up 100, all-down 0, mixed uses the formula, cold/junk null", () => {
+    expect(computeRsi2([100, 100, 100])).toBe(50);
+    expect(computeRsi2([100, 101, 102])).toBe(100);
+    expect(computeRsi2([100, 99, 98])).toBe(0);
+    // +4 then −1 → avgGain 2, avgLoss 0.5 → 100 − 100/(1+4) = 80.
+    expect(computeRsi2([100, 104, 103])).toBeCloseTo(80, 10);
+    // Longer mixed series exercises Wilder smoothing (gain and loss legs).
+    expect(computeRsi2([100, 101, 100, 102, 99])).toBeCloseTo(27.7778, 4);
+    expect(computeRsi2([100, 101])).toBeNull();
+    expect(computeRsi2([100, 101, Number.NaN])).toBeNull();
+  });
+
+  it("Bollinger: cold history null, flat band %B 0.5", () => {
+    expect(computeBollingerUpper([...Array<number>(19).fill(100)])).toBeNull();
+    expect(computeBollingerPercentB([...Array<number>(19).fill(100)])).toBeNull();
+    expect(computeBollingerPercentB([...Array<number>(19).fill(100), Number.NaN])).toBeNull();
+    const flat = [...Array<number>(20).fill(100)];
+    expect(computeBollingerUpper(flat)).toBe(100);
+    expect(computeBollingerPercentB(flat)).toBe(0.5);
+  });
+
+  it("MACD: cold history null; the trigger has a first-green histogram", () => {
+    expect(computeMacdHistogram([...Array<number>(34).fill(90)])).toBeNull();
+    const macd = computeMacdHistogram(TRIGGER_CLOSES);
+    expect(macd).not.toBeNull();
+    expect(macd!.current).toBeGreaterThan(0);
+    expect(macd!.previous).toBeLessThanOrEqual(0);
+  });
+
+  it("signals fail open on short history or junk", () => {
+    expect(taExhaustionSignals([...Array<number>(34).fill(90)])).toBeNull();
+    expect(
+      taExhaustionSignals([...Array<number>(39).fill(90), Number.POSITIVE_INFINITY]),
+    ).toBeNull();
+    // A non-finite threshold falls back to the textbook 90.
+    expect(taExhaustionSignals(TRIGGER_CLOSES, Number.NaN)?.rsiThreshold).toBe(90);
+  });
+
+  it("reasoning names the MACD leg when BB-upper is not the trigger", () => {
+    const signals = taExhaustionSignals(TRIGGER_CLOSES);
+    if (signals === null) throw new Error("trigger fixture must produce signals");
+    const reasoning = taExhaustionReasoning({ ...signals, aboveBbUpper: false }, 1);
+    expect(reasoning).toContain("first-green MACD histogram");
+    expect(reasoning).not.toContain("close above BB-upper");
+  });
+
+  it("the confluence truth table is RSI AND (BB OR MACD)", () => {
+    expect(isTaExhausted(true, true, false)).toBe(true);
+    expect(isTaExhausted(true, false, true)).toBe(true);
+    expect(isTaExhausted(false, true, true)).toBe(false);
+    expect(isTaExhausted(true, false, false)).toBe(false);
   });
 });
 
@@ -287,5 +360,81 @@ describe("resolveTaExhaustionPolicy", () => {
       requireNonnegativePnl: true,
       minFeeIlRatio: 2,
     });
+  });
+});
+
+describe("property: TA-exhaustion projected P&L and gates (#237)", () => {
+  const usd = (max = 1e6) => fc.double({ min: 0, max, noNaN: true });
+
+  it("projection is income minus outgo under the zero-cost model", () => {
+    fc.assert(
+      fc.property(
+        usd(),
+        usd(),
+        usd(),
+        usd(),
+        usd(),
+        usd(),
+        (mark, fees, rewards, pending, deposit, rebalance) => {
+          const net = taExhaustionNetPnlUsd({
+            depositedUsd: deposit,
+            currentValueUsd: mark,
+            cumulativeFeesClaimedUsd: fees,
+            cumulativeRewardsClaimedUsd: rewards,
+            pendingFeesUsd: pending,
+            rebalanceCostsUsd: rebalance,
+            ageMs: 0,
+            paperTrading: true,
+            swapCostPct: 0,
+            harvestCostUsd: 0,
+            conversionCostPct: 0,
+            txCostUsd: 0,
+          });
+          expect(net).toBeCloseTo(mark + fees + rewards + pending - deposit - rebalance, 6);
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
+  it("a loss is never labeled profit; a gain always is (gate off)", () => {
+    fc.assert(
+      fc.property(fc.double({ min: 0.01, max: 1e6, noNaN: true }), (magnitude) => {
+        const loss = maybeTaExhaustionExit(exitInput({ netPnlUsd: -magnitude }));
+        expect(loss?.reasoning).not.toContain("profit-exhaustion");
+        expect(loss?.reasoning).toContain("losing position");
+        const gain = maybeTaExhaustionExit(exitInput({ netPnlUsd: magnitude }));
+        expect(gain?.reasoning).toContain("profit-exhaustion");
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it("the P&L gate with no measured ratio passes exactly when net >= 0", () => {
+    const policy = { ...TA_EXHAUSTION_DEFAULT_POLICY, requireNonnegativePnl: true };
+    fc.assert(
+      fc.property(fc.double({ min: -1e6, max: 1e6, noNaN: true }), (net) => {
+        const decision = maybeTaExhaustionExit(
+          exitInput({ netPnlUsd: net, feeIlRatio: null, policy }),
+        );
+        expect(decision !== null).toBe(net >= 0);
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it("the hold floor passes exactly when age >= minHoldMs", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 10_000 }),
+        fc.integer({ min: 0, max: 10_000 }),
+        (age, floor) => {
+          const policy = { ...TA_EXHAUSTION_DEFAULT_POLICY, minHoldMs: floor };
+          const decision = maybeTaExhaustionExit(exitInput({ ageMs: age, policy }));
+          expect(decision !== null).toBe(age >= floor);
+        },
+      ),
+      { numRuns: 100 },
+    );
   });
 });

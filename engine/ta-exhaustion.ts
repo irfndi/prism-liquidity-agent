@@ -209,10 +209,8 @@ export function computeMacdHistogram(closes: readonly number[]): {
   const macd: number[] = slow.map((s, i) => fast[i + offset]! - s);
   const signal = emaSeries(macd, TA_MACD_SIGNAL_PERIOD);
   const hist: number[] = signal.map((s, i) => macd[i + TA_MACD_SIGNAL_PERIOD - 1]! - s);
-  const current = hist[hist.length - 1];
-  const previous = hist[hist.length - 2];
-  if (current === undefined || previous === undefined) return null;
-  return { current, previous };
+  // The length guard above guarantees >= 2 histogram points (n >= 35).
+  return { current: hist[hist.length - 1]!, previous: hist[hist.length - 2]! };
 }
 
 /** Indicator snapshot behind one EXIT vote. */
@@ -242,9 +240,10 @@ export function taExhaustionSignals(
   const percentB = computeBollingerPercentB(closes);
   const upper = computeBollingerUpper(closes);
   const macd = computeMacdHistogram(closes);
-  const close = closes[closes.length - 1];
+  // The minimum-points guard guarantees a defined close, and the %B guard
+  // above already rejects a non-finite last close.
+  const close = closes[closes.length - 1]!;
   if (rsi2 === null || percentB === null || upper === null || macd === null) return null;
-  if (close === undefined || !Number.isFinite(close)) return null;
   return {
     rsi2,
     rsiThreshold: threshold,
