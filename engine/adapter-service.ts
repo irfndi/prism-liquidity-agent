@@ -1820,6 +1820,142 @@ function settleMeasuredWithdrawals(
   return { withdrawnXAtomic, withdrawnYAtomic };
 }
 
+interface EntryOverheadInput {
+  readonly beforeHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals: number }
+  > | null;
+  readonly afterHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals: number }
+  > | null;
+  readonly beforeNativeSol: bigint | null;
+  readonly afterNativeSol: bigint | null;
+  readonly tokenXMint: string;
+  readonly tokenYMint: string;
+  readonly decimalsX: number;
+  readonly decimalsY: number;
+  readonly priceX: number | undefined;
+  readonly priceY: number | undefined;
+  /** Actually deposited amounts (confirmed position), not the request. */
+  readonly depositXAtomic: string;
+  readonly depositYAtomic: string;
+}
+
+/** Cash spent on one entry leg, in token units. Null when unmeasurable. */
+/** A usable positive price, or null (0 / negative / NaN are unresolved). */
+function usablePrice(price: number | undefined): number | null {
+  return price != null && Number.isFinite(price) && price > 0 ? price : null;
+}
+
+/** Native-SOL spend in whole SOL: the before/after balance gap. */
+function solSpendUnits(input: EntryOverheadInput): number | null {
+  if (input.beforeNativeSol === null || input.afterNativeSol === null) return null;
+  return Number(input.beforeNativeSol - input.afterNativeSol) / 1e9;
+}
+
+/** SPL spend in whole tokens, capped at 3x the deposit. */
+function splSpendUnits(
+  input: EntryOverheadInput,
+  mint: string,
+  decimals: number,
+  depositAtomic: string,
+): number | null {
+  if (input.beforeHeld === null || input.afterHeld === null) return null;
+  const before = input.beforeHeld.get(mint)?.amountAtomic ?? 0n;
+  const after = input.afterHeld.get(mint)?.amountAtomic ?? 0n;
+  const spent = before - after;
+  // A negative delta means the wallet GAINED that token (an airdrop or a
+  // concurrent fill) — that is not this entry's spend, so charge nothing.
+  if (spent <= 0n) return 0;
+  // Trust the measured delta but never more than a sane multiple of the
+  // requested deposit; a mis-decoded mint would otherwise book the treasury.
+  const deposited = Number(atomicToUnits(BigInt(depositAtomic || "0"), decimals));
+  return cappedSpend(Number(atomicToUnits(spent, decimals)), deposited);
+}
+
+/** Measured spend, capped at 3x the deposit (guards a mis-decoded mint). */
+function cappedSpend(measured: number, deposited: number): number | null {
+  if (!Number.isFinite(measured)) return null;
+  return deposited > 0 ? Math.min(measured, deposited * 3) : measured;
+}
+
+function legSpendUnits(
+  input: EntryOverheadInput,
+  mint: string,
+  decimals: number,
+  depositAtomic: string,
+): number | null {
+  return mint === SOL_MINT
+    ? solSpendUnits(input)
+    : splSpendUnits(input, mint, decimals, depositAtomic);
+}
+
+/** The deposit's own USD value at the entry prices. */
+function entryDepositUsd(input: EntryOverheadInput, priceX: number, priceY: number): number {
+  const xUsd = Number(atomicToUnits(BigInt(input.depositXAtomic || "0"), input.decimalsX)) * priceX;
+  const yUsd = Number(atomicToUnits(BigInt(input.depositYAtomic || "0"), input.decimalsY)) * priceY;
+  return xUsd + yUsd;
+}
+
+/**
+ * Cash spent at entry BEYOND the deposit: position/bin-array/ATA rent, the
+ * entry transaction fee, and wSOL wrap rent. Measured from the same wallet
+ * delta the exit uses, so the two sides of realized PnL are symmetric and
+ * refunded rent can never be booked as trading profit.
+ *
+ * Returns null when unmeasurable (missing snapshot, missing price, non-finite
+ * arithmetic) — the caller records "unknown" rather than a fabricated 0.
+ * Clamped at 0: an entry that somehow costs less than the deposit reports no
+ * overhead (it never reports a credit).
+ */
+export function computeEntryOverheadUsd(input: EntryOverheadInput): number | null {
+  const priceX = usablePrice(input.priceX);
+  const priceY = usablePrice(input.priceY);
+  if (priceX === null || priceY === null) return null;
+  const spentX = legSpendUnits(input, input.tokenXMint, input.decimalsX, input.depositXAtomic);
+  const spentY = legSpendUnits(input, input.tokenYMint, input.decimalsY, input.depositYAtomic);
+  if (spentX === null || spentY === null) return null;
+  const spentUsd = spentX * priceX + spentY * priceY;
+  const depositUsd = entryDepositUsd(input, priceX, priceY);
+  if (!Number.isFinite(spentUsd) || !Number.isFinite(depositUsd)) return null;
+  return Math.max(0, spentUsd - depositUsd);
+}
+
+/**
+ * Deposit-only realized value for an exit: the measured gross withdrawal less
+ * the cash the entry spent beyond its deposit (rent + fee + wrap), floored at
+ * 0. The rent refund arrives inside the gross delta, so without this a
+ * dead-flat round trip books rent as profit. `null` in → `null` out
+ * (unpriced exits stay unpriced; they never become 0).
+ */
+export function netWithdrawnUsd(
+  grossWithdrawnUsd: number | null,
+  entryOverheadUsd: number,
+): number | null {
+  if (grossWithdrawnUsd === null) return null;
+  if (!Number.isFinite(grossWithdrawnUsd)) return null;
+  const overhead = Number.isFinite(entryOverheadUsd) && entryOverheadUsd > 0 ? entryOverheadUsd : 0;
+  return Math.max(0, grossWithdrawnUsd - overhead);
+}
+
+/** The deposited atomic amount: the confirmed position's real fill, else the request. */
+function entryDepositBasis(
+  confirmed: {
+    readonly positionData: {
+      readonly totalXAmountExcludeTransferFee: { toString(): string };
+      readonly totalYAmountExcludeTransferFee: { toString(): string };
+    };
+  } | null,
+  leg: "x" | "y",
+  fallback: bigint,
+): string {
+  if (confirmed === null) return fallback.toString();
+  return leg === "x"
+    ? confirmed.positionData.totalXAmountExcludeTransferFee.toString()
+    : confirmed.positionData.totalYAmountExcludeTransferFee.toString();
+}
+
 function priceExitLegs(
   withdrawnXAtomic: string,
   withdrawnYAtomic: string,
@@ -3910,6 +4046,55 @@ export const makeAdapterLive = (
         );
       }
 
+      /**
+       * Entry cost basis measurement, symmetric with the exit's: one wallet
+       * snapshot after the confirmed entry, then the same delta math. Extracted
+       * from `enterPosition` so the entry generator stays within its complexity
+       * budget and this measurement has exactly one place to be reviewed.
+       */
+      function measureEntryOverhead(input: {
+        readonly before: {
+          readonly held: ReadonlyMap<
+            string,
+            { readonly amountAtomic: bigint; readonly decimals: number }
+          > | null;
+          readonly nativeSol: bigint | null;
+        };
+        readonly tokenXMint: string;
+        readonly tokenYMint: string;
+        readonly decimalsX: number;
+        readonly decimalsY: number;
+        readonly priceX: number | undefined;
+        readonly priceY: number | undefined;
+        readonly depositXAtomic: string;
+        readonly depositYAtomic: string;
+        readonly positionPubKey: string;
+      }) {
+        return Effect.gen(function* () {
+          const after = yield* readPostCloseSnapshot();
+          const overhead = computeEntryOverheadUsd({
+            beforeHeld: input.before.held,
+            afterHeld: after.held,
+            beforeNativeSol: input.before.nativeSol,
+            afterNativeSol: after.nativeSol,
+            tokenXMint: input.tokenXMint,
+            tokenYMint: input.tokenYMint,
+            decimalsX: input.decimalsX,
+            decimalsY: input.decimalsY,
+            priceX: input.priceX,
+            priceY: input.priceY,
+            depositXAtomic: input.depositXAtomic,
+            depositYAtomic: input.depositYAtomic,
+          });
+          if (overhead === null) {
+            logger.warn(
+              `[entry] cost basis unmeasured for ${input.positionPubKey} — realized PnL on this position stays gross of rent`,
+            );
+          }
+          return overhead;
+        });
+      }
+
       function broadcastCloseTransactions(txs: ReadonlyArray<Transaction>) {
         return Effect.gen(function* () {
           for (const tx of txs) {
@@ -4903,6 +5088,11 @@ export const makeAdapterLive = (
             const actualSolBalance = yield* readNativeSolBalance({ force: true });
             yield* requireEntryGas(actualSolBalance, requiredLamports, poolAddress);
 
+            // Wallet baseline for the measured entry cost. Same reader the exit
+            // uses (cache-backed holdings + forced native SOL), so the two sides
+            // of realized PnL are measured identically.
+            const preEntry = yield* readPreCloseSnapshot();
+
             tx.feePayer = wallet.publicKey;
             const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
             tx.recentBlockhash = blockhash;
@@ -4949,12 +5139,31 @@ export const makeAdapterLive = (
               );
             }
 
+            // Measured entry cost basis: cash out (deposit + rent + fee + wrap)
+            // minus the deposit. Stored on the position so the exit can keep
+            // realized PnL deposit-only. A read failure fails OPEN (the entry
+            // already landed) — realized PnL on that position then stays gross
+            // of rent, which is the pre-fix behaviour, never a fabricated value.
+            const entryOverheadUsd = yield* measureEntryOverhead({
+              before: preEntry,
+              tokenXMint: pool.tokenX,
+              tokenYMint: pool.tokenY,
+              decimalsX: tokenXDecimals,
+              decimalsY: tokenYDecimals,
+              priceX,
+              priceY,
+              depositXAtomic: entryDepositBasis(confirmedPosition, "x", depositXAtomic),
+              depositYAtomic: entryDepositBasis(confirmedPosition, "y", depositYAtomic),
+              positionPubKey: positionKeypair.publicKey.toBase58(),
+            });
+
             return {
               positionPubKey: positionKeypair.publicKey.toBase58(),
               txSignature: signature,
               depositMode,
               amountXUsd,
               amountYUsd,
+              entryOverheadUsd,
             };
           }).pipe(
             Effect.catch((err) =>
@@ -4968,7 +5177,7 @@ export const makeAdapterLive = (
             ),
           ),
 
-        exitPosition: (poolAddress, positionPubKey) =>
+        exitPosition: (poolAddress, positionPubKey, options) =>
           Effect.gen(function* () {
             if (!wallet) {
               return yield* Effect.fail(
@@ -5114,11 +5323,26 @@ export const makeAdapterLive = (
               pendingFeeYAtomic,
             );
 
+            // Cash spent at entry beyond the deposit (rent + entry fee + wrap)
+            // comes BACK as a rent refund inside the measured withdrawal delta
+            // above. Subtracting it here keeps both sides of realized PnL
+            // deposit-only: a dead-flat round trip books ~0, not +rent. Absent
+            // (legacy rows / unmeasured entry) subtracts nothing.
+            const rawOverheadUsd = options?.entryOverheadUsd;
+            const entryOverheadUsd =
+              rawOverheadUsd !== undefined && Number.isFinite(rawOverheadUsd) && rawOverheadUsd > 0
+                ? rawOverheadUsd
+                : 0;
+            const grossWithdrawnUsd = accounting.withdrawnUsd;
+            const withdrawnUsd = netWithdrawnUsd(grossWithdrawnUsd, entryOverheadUsd);
+
             return {
               txSignature: "batch-confirmed",
               withdrawnXAtomic,
               withdrawnYAtomic,
-              withdrawnUsd: accounting.withdrawnUsd,
+              withdrawnUsd,
+              grossWithdrawnUsd,
+              entryOverheadUsd,
               pendingFeeXAtomic,
               pendingFeeYAtomic,
               pendingFeeUsd: accounting.pendingFeeUsd,
