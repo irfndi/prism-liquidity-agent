@@ -1,10 +1,11 @@
 import { Effect, Layer } from "effect";
 import { createLogger } from "./logger.js";
 import { DexScreenerService } from "./services.js";
+import { BoundedTtlCache, PublicProviderBreaker, RequestPacer } from "./public-data-client.js";
 
 /**
- * DexScreener parallel pool-stats source. Sits alongside GeckoTerminal as a
- * secondary resilience tier for the Meteora Data API: when the Data API is
+ * DexScreener primary secondary pool-stats source. Sits ahead of GeckoTerminal
+ * as the first resilience tier for the Meteora Data API: when the Data API is
  * unreachable, DexScreener's keyless public API (300 req/min, far higher than
  * GeckoTerminal's 30/min) supplies REAL 24h volume and reserve TVL so
  * volume-authenticity, TVL gates and volume measurements stay computed from
@@ -38,20 +39,31 @@ const DEFAULT_BASE_URL = "https://api.dexscreener.com/latest/dex";
 const REQUEST_TIMEOUT_MS = 10_000;
 
 // ─── Request pacing (300 req/min keyless endpoint) ───────────────────────────
-// Far more headroom than GeckoTerminal's 30/min, but a Data-API outage can still
-// fan out a full pool list, so a modest 120ms between requests (~8/min headroom
-// over 500/min) keeps bursts well under the quota while staying fast enough to
-// drain a 50-pool list in ~6s. The 429 → null fail-through remains the backstop.
-const DEFAULT_REQUEST_INTERVAL_MS = 120;
-let nextDexscreenerRequestAt = 0;
-let requestIntervalMs = DEFAULT_REQUEST_INTERVAL_MS;
+// 250ms keeps the shared pool/token lookup budget at ~240 req/min, leaving
+// headroom for retries instead of deliberately running into the 429 ceiling.
+const DEFAULT_REQUEST_INTERVAL_MS = 250;
+const DEFAULT_TOKEN_API_URL = "https://api.dexscreener.com/tokens/v1/solana";
+const MINTS_PER_REQUEST = 30;
+const requestPacer = new RequestPacer(DEFAULT_REQUEST_INTERVAL_MS);
+const providerBreaker = new PublicProviderBreaker(3, 60_000);
+const POOL_STATS_CACHE_TTL_MS = 30_000;
+const POOL_MISS_CACHE_TTL_MS = 5_000;
+const MAX_POOL_STATS_CACHE_ENTRIES = 500;
+const poolStatsCache = new BoundedTtlCache<DexscreenerPoolStats>(MAX_POOL_STATS_CACHE_ENTRIES);
+const poolRequestCache = new BoundedTtlCache<DexscreenerPoolStats | null>(
+  MAX_POOL_STATS_CACHE_ENTRIES,
+);
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+export function clearDexscreenerCacheForTest(): void {
+  poolStatsCache.clear();
+  poolRequestCache.clear();
+  providerBreaker.reset();
+  requestPacer.reset();
+}
 
-/** TEST-ONLY: override the inter-request interval (same contract as the gecko
- *  service's test hook). Restore to DEFAULT_REQUEST_INTERVAL_MS afterwards. */
 export function setDexscreenerRequestIntervalMsForTest(ms: number): void {
-  requestIntervalMs = ms;
+  requestPacer.intervalMs = ms;
+  requestPacer.reset();
 }
 
 /** The `fetch` call surface the module needs (bare signature, mirroring the
@@ -78,10 +90,17 @@ interface RawLiquidity {
   readonly usd: unknown;
 }
 
+interface RawDexscreenerToken {
+  readonly address: unknown;
+}
+
 interface RawDexscreenerPair {
   readonly volume: unknown;
   readonly liquidity: unknown;
   readonly priceUsd: unknown;
+  readonly priceNative: unknown;
+  readonly baseToken: unknown;
+  readonly quoteToken: unknown;
 }
 
 interface RawDexscreenerResponse {
@@ -150,13 +169,6 @@ function resolveDexBaseUrl(configured: string | undefined, envUrl: string | unde
   return base.length > 0 ? base : DEFAULT_BASE_URL;
 }
 
-/** Reserve the next pacing slot; returns the millis the caller must wait. */
-function claimDexRequestSlot(nowMs: number): number {
-  const delayMs = Math.max(0, nextDexscreenerRequestAt - nowMs);
-  nextDexscreenerRequestAt = Math.max(nowMs, nextDexscreenerRequestAt) + requestIntervalMs;
-  return delayMs;
-}
-
 /**
  * Parse one `GET .../pairs/solana/{address}` response. Returns null when the
  * payload has no usable pair object or 24h volume cannot be read (the one field
@@ -183,6 +195,111 @@ export function parseDexscreenerPoolStats<T>(
   };
 }
 
+function readTokenAddress<T>(value: T): string | null {
+  if (!isNonNullObject(value)) return null;
+  // SAFETY: isNonNullObject establishes the record shape at this external-data boundary.
+  const address = (value as RawDexscreenerToken).address;
+  if (Object.prototype.toString.call(address) !== "[object String]") return null;
+  // SAFETY: The preceding runtime branch establishes the asserted primitive type.
+  const text = address as string;
+  return text.length > 0 ? text : null;
+}
+
+function readPositiveNumber<T>(value: T): number | null {
+  const number = readFiniteNumber(value);
+  return number !== null && number > 0 ? number : null;
+}
+
+/** Parse the batch token-pairs response, choosing each mint's deepest pair. */
+export function parseDexscreenerTokenPrices<T>(
+  raw: T,
+  requestedMints: ReadonlyArray<string>,
+): ReadonlyMap<string, number> {
+  const result = new Map<string, number>();
+  if (!Array.isArray(raw)) return result;
+  const requested = new Set(requestedMints);
+  const bestLiquidity = new Map<string, number>();
+  const consider = (mint: string | null, price: number | null, liquidityUsd: number): void => {
+    if (mint === null || !requested.has(mint) || price === null || price <= 0) return;
+    const previous = bestLiquidity.get(mint);
+    if (previous !== undefined && previous >= liquidityUsd) return;
+    bestLiquidity.set(mint, liquidityUsd);
+    result.set(mint, price);
+  };
+  for (const value of raw) {
+    if (!isNonNullObject(value)) continue;
+    // SAFETY: isNonNullObject establishes the record shape at this external-data boundary.
+    const pair = value as RawDexscreenerPair;
+    const liquidityUsd = readDexLiquidityUsd(pair) ?? 0;
+    const priceUsd = readPositiveNumber(pair.priceUsd);
+    const priceNative = readPositiveNumber(pair.priceNative);
+    consider(readTokenAddress(pair.baseToken), priceUsd, liquidityUsd);
+    if (priceUsd !== null && priceNative !== null) {
+      consider(readTokenAddress(pair.quoteToken), priceUsd / priceNative, liquidityUsd);
+    }
+  }
+  return result;
+}
+
+async function fetchDexscreenerTokenChunk(
+  chunk: ReadonlyArray<string>,
+  options: {
+    readonly baseUrl: string;
+    readonly timeoutMs: number;
+    readonly fetchImpl: FetchLike;
+  },
+): Promise<ReadonlyMap<string, number>> {
+  if (!providerBreaker.canTry()) return new Map();
+  await requestPacer.wait();
+  const path = chunk.map((mint) => encodeURIComponent(mint)).join(",");
+  try {
+    const response = await options.fetchImpl(`${options.baseUrl}/${path}`, {
+      signal: AbortSignal.timeout(options.timeoutMs),
+    });
+    if (!response.ok) {
+      providerBreaker.recordFailure();
+      logger.warn("DexScreener token prices unavailable", { status: response.status });
+      return new Map();
+    }
+    const body: unknown = await response.json();
+    providerBreaker.recordSuccess();
+    return parseDexscreenerTokenPrices(body, chunk);
+  } catch (error) {
+    providerBreaker.recordFailure();
+    logger.warn("DexScreener token price fetch failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Map();
+  }
+}
+
+/** Fetch up to 30 mints per request from DexScreener's keyless token-pairs API. */
+export async function getDexscreenerTokenPrices(
+  mints: ReadonlyArray<string>,
+  options: {
+    readonly baseUrl?: string;
+    readonly timeoutMs?: number;
+    readonly fetchImpl?: FetchLike;
+  } = {},
+): Promise<ReadonlyMap<string, number>> {
+  const uniqueMints = [...new Set(mints)];
+  const result = new Map<string, number>();
+  if (uniqueMints.length === 0 || !providerBreaker.canTry()) return result;
+  const request = {
+    baseUrl: (options.baseUrl ?? process.env.DEXSCREENER_TOKEN_API_URL ?? DEFAULT_TOKEN_API_URL)
+      .trim()
+      .replace(/\/+$/, ""),
+    timeoutMs: options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+    fetchImpl: options.fetchImpl ?? fetch,
+  };
+  for (let start = 0; start < uniqueMints.length; start += MINTS_PER_REQUEST) {
+    const chunk = uniqueMints.slice(start, start + MINTS_PER_REQUEST);
+    const parsed = await fetchDexscreenerTokenChunk(chunk, request);
+    for (const [mint, price] of parsed) result.set(mint, price);
+  }
+  return result;
+}
+
 // ─── Pool enrichment (source-aware) ──────────────────────────────────────────
 // DexScreener data is enriched through the SAME `enrichPoolFromGecko` path as
 // GeckoTerminal (identical trust posture: measured volume/TVL, modeled fees, no
@@ -191,6 +308,14 @@ export function parseDexscreenerPoolStats<T>(
 // `enrichPoolFromGecko` for BOTH secondary sources.
 
 // ─── Fetcher (fail-through to the next source) ───────────────────────────────
+
+function cachePoolStats(
+  poolAddress: string,
+  baseFeeRate: number,
+  stats: DexscreenerPoolStats,
+): void {
+  poolStatsCache.set(`${poolAddress}|${baseFeeRate}`, stats, POOL_STATS_CACHE_TTL_MS);
+}
 
 /**
  * Fetch real stats for one pool from DexScreener. NEVER throws and NEVER crashes
@@ -201,7 +326,7 @@ export function parseDexscreenerPoolStats<T>(
  * `baseFeeRate` is the pool's binStep-derived base-fee fraction (the caller
  * computes `0.0025 + binStep / 1e4`); `baseUrl` overrides the endpoint.
  */
-export async function getDexscreenerPoolStats(
+async function fetchDexscreenerPoolStatsUncached(
   poolAddress: string,
   options: {
     readonly baseFeeRate: number;
@@ -210,6 +335,7 @@ export async function getDexscreenerPoolStats(
     readonly fetchImpl?: FetchLike;
   },
 ): Promise<DexscreenerPoolStats | null> {
+  if (!providerBreaker.canTry()) return null;
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const effectiveBase = resolveDexBaseUrl(options.baseUrl, process.env.DEXSCREENER_API_URL);
@@ -218,14 +344,12 @@ export async function getDexscreenerPoolStats(
   // Pace toward the keyless quota (see the pacing constants above). Reserving
   // the next slot synchronously before any await keeps concurrent callers from
   // observing the same free slot.
-  const delayMs = claimDexRequestSlot(Date.now());
-  if (delayMs > 0) {
-    await sleep(delayMs);
-  }
+  await requestPacer.wait();
 
   try {
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) {
+      providerBreaker.recordFailure();
       logger.warn("DexScreener unavailable — falling through to next stats source", {
         pool: poolAddress,
         status: res.status,
@@ -234,6 +358,7 @@ export async function getDexscreenerPoolStats(
     }
     const body: unknown = await res.json();
     const parsed = parseDexscreenerPoolStats(body, options.baseFeeRate);
+    providerBreaker.recordSuccess();
     if (parsed === null) {
       logger.warn("DexScreener returned an unparseable or unknown pool payload", {
         pool: poolAddress,
@@ -248,14 +373,34 @@ export async function getDexscreenerPoolStats(
       });
       return null;
     }
+    cachePoolStats(poolAddress, options.baseFeeRate, parsed);
     return parsed;
   } catch (err) {
+    providerBreaker.recordFailure();
     logger.warn("DexScreener fetch failed — falling through to next stats source", {
       pool: poolAddress,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
   }
+}
+
+export async function getDexscreenerPoolStats(
+  poolAddress: string,
+  options: {
+    readonly baseFeeRate: number;
+    readonly baseUrl?: string;
+    readonly timeoutMs?: number;
+    readonly fetchImpl?: FetchLike;
+  },
+): Promise<DexscreenerPoolStats | null> {
+  const cacheKey = `${poolAddress}|${options.baseFeeRate}`;
+  const cached = poolStatsCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const requestKey = `${cacheKey}|${options.baseUrl ?? process.env.DEXSCREENER_API_URL ?? ""}|${options.timeoutMs ?? REQUEST_TIMEOUT_MS}`;
+  return poolRequestCache.getOrFetch(requestKey, POOL_MISS_CACHE_TTL_MS, () =>
+    fetchDexscreenerPoolStatsUncached(poolAddress, options),
+  );
 }
 
 // ─── Effect service wiring ───────────────────────────────────────────────────

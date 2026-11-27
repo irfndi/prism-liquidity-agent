@@ -2,6 +2,24 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.49] — 2026-11-26
+
+### Added
+
+- **Free public-data scalability.** DefiLlama batch coin prices/symbol/decimals and DexScreener batch token prices (30 mints/request) join the existing keyless price chain. Pool stats now resolve Meteora Data API → DexScreener (300 req/min) → GeckoTerminal (30 req/min) → heuristic, while secondary fees remain explicitly modeled and excluded from measured-fee gates.
+- **Bounded public-data efficiency layer.** Normalized TTL caches, single-flight request deduplication, per-provider pacing, and fail-fast provider circuit breakers prevent duplicate public API usage. Raw public responses are not persisted.
+- **Provider diagnostics.** `prism doctor` probes every configured RPC fallback independently and verifies DefiLlama/DexScreener connectivity.
+
+### Changed
+
+- **Health-aware RPC routing.** Replaced pure round-robin with earliest-slot routing that excludes circuit-open providers, paces each endpoint independently, rotates immediately on 429/5xx/timeouts, and retries the whole pool only after all legs fail.
+- **Independent free RPC defaults.** Solana Labs, PublicNode, and Pocket Network provide separate quota legs; the two Solana Labs hostnames correctly count as one provider. `RPC_MIN_INTERVAL_MS` defaults to 250ms per provider.
+
+### Verification
+
+- Full `bun run verify` gate passed: typecheck, lint, format, complete Vitest suite, Bend proofs, and all fixed/buggy TLA+ models.
+- Engine bundle build passed.
+
 ## [0.2.48] — 2026-11-26
 
 ### Changed

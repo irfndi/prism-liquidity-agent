@@ -39,7 +39,7 @@ import {
   type SwapSimulation,
   type SwapStatus,
 } from "./services.js";
-import { ConfigService } from "./config-service.js";
+import { ConfigService, parseRpcPoolUrls } from "./config-service.js";
 import { DbService } from "./services.js";
 import {
   deserializeCache,
@@ -58,8 +58,15 @@ import { SwapQuoteError, SwapValidationError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { getPrismUserConfigDir } from "./paths.js";
 import type { BinData, EntryDepositMode, EntryStrategySpec } from "./types.js";
-import { CircuitBreaker, isRpcNetworkError, retryEffectWithBackoff } from "./adapter-retry.js";
+import {
+  CircuitBreaker,
+  CircuitBreakerOpenError,
+  isRpcNetworkError,
+  retryEffectWithBackoff,
+} from "./adapter-retry.js";
 import { jupiterFetch } from "./jupiter-client.js";
+import { fetchDefillamaCoins, type DefillamaCoinData } from "./defillama-service.js";
+import { getDexscreenerTokenPrices } from "./dexscreener-service.js";
 import bs58 from "bs58";
 import fs from "fs";
 import path from "path";
@@ -1304,7 +1311,7 @@ function resolveHeliusTokenPrice(json: HeliusAssetResponse | null): number | und
   return readHeliusPrice(json);
 }
 
-function attachHeliusPrice(meta: MutableTokenMeta, priceUsd: number | undefined): void {
+function attachTokenPrice(meta: MutableTokenMeta, priceUsd: number | undefined): void {
   if (priceUsd === undefined) return;
   meta.priceUsd = priceUsd;
   meta.priceFetchedAt = Date.now();
@@ -1317,7 +1324,7 @@ function parseHeliusTokenMeta(mint: string, json: HeliusAssetResponse | null): T
     symbol: json?.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
     decimals: d,
   };
-  attachHeliusPrice(meta, resolveHeliusTokenPrice(json));
+  attachTokenPrice(meta, resolveHeliusTokenPrice(json));
   return meta;
 }
 
@@ -2122,34 +2129,19 @@ export const makeAdapterLive = (
       const config = yield* ConfigService;
       const db = yield* DbService;
 
-      const connection = new Connection(config.solanaRpcUrl, "confirmed");
-      // Round-robin RPC pool: the primary URL plus any comma-separated extra
-      // endpoints in SOLANA_RPC_FALLBACK_URL. Spreading requests across free /
-      // keyless endpoints keeps a single one from tripping its per-method /
-      // per-IP rate limit, while each endpoint keeps its own circuit breaker so
-      // a 429 / 5xx rotates to the next endpoint instead of failing the call.
-      const rpcPoolUrls = [config.solanaRpcUrl];
-      for (const raw of config.solanaRpcFallbackUrl.split(",")) {
-        const url = raw.trim();
-        if (url && !rpcPoolUrls.includes(url)) rpcPoolUrls.push(url);
-      }
+      const rpcPoolUrls = parseRpcPoolUrls(config.solanaRpcUrl, config.solanaRpcFallbackUrl);
       interface RpcEndpoint {
         readonly url: string;
         readonly conn: Connection;
         readonly breaker: CircuitBreaker;
+        nextRpcStartAt: number;
       }
-      const rpcEndpoints: RpcEndpoint[] = [
-        {
-          url: config.solanaRpcUrl,
-          conn: connection,
-          breaker: new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 }),
-        },
-        ...rpcPoolUrls.slice(1).map((url) => ({
-          url,
-          conn: new Connection(url, "confirmed"),
-          breaker: new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 }),
-        })),
-      ];
+      const rpcEndpoints: RpcEndpoint[] = rpcPoolUrls.map((url) => ({
+        url,
+        conn: new Connection(url, "confirmed"),
+        breaker: new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 }),
+        nextRpcStartAt: 0,
+      }));
       const wallet = config.walletPrivateKey
         ? yield* Effect.try({
             try: () => Keypair.fromSecretKey(bs58.decode(config.walletPrivateKey)),
@@ -2166,17 +2158,42 @@ export const makeAdapterLive = (
       const DLMM_CACHE_TTL_MS = 5 * 60 * 1000;
       const dlmmCacheTtlMs = config.dlmmCacheTtlMs ?? DLMM_CACHE_TTL_MS;
       const rpcIntervalMs = config.rpcMinIntervalMs ?? RPC_MIN_INTERVAL_MS;
-      let nextRpcStartAt = 0;
       let rpcRoundRobinCursor = 0;
       let nextHeliusRequestAt = 0;
 
-      function paceRpc(): Effect.Effect<void> {
+      function paceRpc(endpoint: RpcEndpoint): Effect.Effect<void> {
         return Effect.sync(() => {
           const now = Date.now();
-          const waitMs = Math.max(0, nextRpcStartAt - now);
-          nextRpcStartAt = Math.max(now, nextRpcStartAt) + rpcIntervalMs;
+          const waitMs = Math.max(0, endpoint.nextRpcStartAt - now);
+          endpoint.nextRpcStartAt = Math.max(now, endpoint.nextRpcStartAt) + rpcIntervalMs;
           return waitMs;
         }).pipe(Effect.flatMap(Effect.sleep));
+      }
+
+      function paceAnyRpc(): Effect.Effect<void> {
+        const endpoint = rpcEndpoints[rpcRoundRobinCursor % rpcEndpoints.length]!;
+        rpcRoundRobinCursor = (rpcRoundRobinCursor + 1) % rpcEndpoints.length;
+        return paceRpc(endpoint);
+      }
+
+      function selectRpcEndpoint(excluded: ReadonlySet<RpcEndpoint>): RpcEndpoint | null {
+        const now = Date.now();
+        let best: RpcEndpoint | null = null;
+        let bestIndex = -1;
+        let bestWaitMs = Number.POSITIVE_INFINITY;
+        for (let offset = 0; offset < rpcEndpoints.length; offset += 1) {
+          const index = (rpcRoundRobinCursor + offset) % rpcEndpoints.length;
+          const endpoint = rpcEndpoints[index]!;
+          if (excluded.has(endpoint) || endpoint.breaker.getState() === "OPEN") continue;
+          const waitMs = Math.max(0, endpoint.nextRpcStartAt - now);
+          if (waitMs < bestWaitMs) {
+            best = endpoint;
+            bestIndex = index;
+            bestWaitMs = waitMs;
+          }
+        }
+        if (best !== null) rpcRoundRobinCursor = (bestIndex + 1) % rpcEndpoints.length;
+        return best;
       }
 
       function paceHeliusRequest(): Effect.Effect<void> {
@@ -2198,47 +2215,57 @@ export const makeAdapterLive = (
       }
 
       function rpcCall<T>(fn: (conn: Connection) => Promise<T>): Effect.Effect<T, Error> {
-        const startIndex = rpcRoundRobinCursor % rpcEndpoints.length;
-        rpcRoundRobinCursor = (rpcRoundRobinCursor + 1) % rpcEndpoints.length;
-
         const run = (endpoint: RpcEndpoint): Effect.Effect<T, Error> =>
-          paceRpc().pipe(
-            Effect.andThen(
-              endpoint.breaker.execute(
-                retryEffectWithBackoff(
-                  withRpcTimeout(
-                    Effect.tryPromise({
-                      try: () => fn(endpoint.conn),
-                      // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
-                      catch: (cause) => cause as Error,
-                    }),
-                  ),
-                  RPC_RETRY_OPTIONS,
+          endpoint.breaker.execute(
+            paceRpc(endpoint).pipe(
+              Effect.andThen(
+                withRpcTimeout(
+                  Effect.tryPromise({
+                    try: () => fn(endpoint.conn),
+                    // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
+                    catch: (cause) => cause as Error,
+                  }),
                 ),
-                isRpcNetworkError,
               ),
             ),
+            isRpcNetworkError,
           );
 
-        const tryEndpoint = (offset: number, attemptsLeft: number): Effect.Effect<T, Error> => {
-          // The pool is non-empty by construction (primary URL is always present).
-          const endpoint = rpcEndpoints[(startIndex + offset) % rpcEndpoints.length]!;
-          return run(endpoint).pipe(
-            Effect.catch((err) => {
-              if (attemptsLeft > 1 && isRpcNetworkError(err)) {
-                return Effect.sync(() =>
-                  logger.warn("RPC endpoint failed, rotating to next", {
-                    url: endpoint.url.replace(/api-key=[^&]+/g, "api-key=[REDACTED]"),
-                    error: err instanceof Error ? err.message : String(err),
-                  }),
-                ).pipe(Effect.andThen(tryEndpoint(offset + 1, attemptsLeft - 1)));
-              }
-              return Effect.fail(err);
-            }),
-          );
-        };
+        const tried = new Set<RpcEndpoint>();
+        const tryBestEndpoint = (): Effect.Effect<T, Error> =>
+          Effect.suspend(() => {
+            const endpoint = selectRpcEndpoint(tried);
+            if (endpoint === null) {
+              return Effect.fail(
+                new CircuitBreakerOpenError({
+                  message: "All RPC provider circuits are OPEN",
+                }),
+              );
+            }
+            tried.add(endpoint);
+            return run(endpoint).pipe(
+              Effect.catch((err) => {
+                if (tried.size < rpcEndpoints.length && isRpcNetworkError(err)) {
+                  return Effect.sync(() =>
+                    logger.warn("RPC endpoint failed, rotating to next", {
+                      url: endpoint.url.replace(/api[-_]key=[^&]+/gi, "api-key=[REDACTED]"),
+                      error: err instanceof Error ? err.message : String(err),
+                    }),
+                  ).pipe(Effect.andThen(tryBestEndpoint()));
+                }
+                return Effect.fail(err);
+              }),
+            );
+          });
 
-        return tryEndpoint(0, rpcEndpoints.length);
+        // Rotate immediately on 429/5xx/timeout. Only back off after every
+        // provider leg failed, so a dead primary never adds its retry delay to
+        // a healthy fallback's response.
+        const runPool = Effect.suspend(() => {
+          tried.clear();
+          return tryBestEndpoint();
+        });
+        return retryEffectWithBackoff(runPool, RPC_RETRY_OPTIONS);
       }
 
       const dlmmCacheEntries = new Map<
@@ -2344,7 +2371,7 @@ export const makeAdapterLive = (
           if (memo && Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS) {
             return { binId: memo.binId, price: memo.price, pricePerToken: memo.pricePerToken };
           }
-          const activeBin = yield* paceRpc().pipe(
+          const activeBin = yield* paceAnyRpc().pipe(
             Effect.andThen(Effect.tryPromise(() => dlmm.getActiveBin())),
           );
           activeBinMemo.set(poolAddress, {
@@ -2378,7 +2405,7 @@ export const makeAdapterLive = (
             const cached = memo.binsAround;
             if (cached !== null) return cached;
           }
-          const bins = yield* paceRpc().pipe(
+          const bins = yield* paceAnyRpc().pipe(
             Effect.andThen(
               Effect.tryPromise(() => dlmm.getBinsAroundActiveBin(halfRange, halfRange)),
             ),
@@ -2526,6 +2553,28 @@ export const makeAdapterLive = (
         });
       }
 
+      // DefiLlama's keyless coin API returns symbol + decimals + a confidence-
+      // scored price in one batchable call. Prefer it over per-mint RPC and
+      // keyed Helius lookups; stale/low-confidence prices are rejected by the
+      // parser while immutable metadata remains usable.
+      function probeDefillamaTokenMeta(mint: string): Effect.Effect<TokenMeta | null, never> {
+        if (config.defillamaEnabled === false) return Effect.succeed(null);
+        return Effect.gen(function* () {
+          const coins = yield* Effect.tryPromise(() => fetchDefillamaCoins([mint])).pipe(
+            Effect.catch(() => Effect.succeed(new Map<string, DefillamaCoinData>())),
+          );
+          const coin = coins.get(mint);
+          if (coin?.decimals == null) return null;
+          const meta: MutableTokenMeta = {
+            symbol: coin.symbol ?? mint.slice(0, 4),
+            decimals: coin.decimals,
+          };
+          attachTokenPrice(meta, coin.priceUsd ?? undefined);
+          yield* persistTokenMeta(mint, meta);
+          return meta;
+        });
+      }
+
       // Standard Solana RPC probe (keyless): parsed account info exposes
       // decimals for any SPL mint via the Token Program (works on mainnet-beta
       // and every other standard RPC). Preferred over Helius DAS getAsset so
@@ -2570,6 +2619,9 @@ export const makeAdapterLive = (
             yield* persistTokenMeta(mint, known);
             return known;
           }
+
+          const defillamaMeta = yield* probeDefillamaTokenMeta(mint);
+          if (defillamaMeta !== null) return defillamaMeta;
 
           const rpcMeta = yield* probeRpcTokenMeta(mint);
           if (rpcMeta !== null) return rpcMeta;
@@ -2694,6 +2746,42 @@ export const makeAdapterLive = (
           // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           const liteJson = (yield* Effect.tryPromise(() => liteRes.json())) as JupiterPricePayload;
           return parseJupiterPriceResponse(liteJson, missing);
+        }).pipe(Effect.catch(() => Effect.succeed({})));
+      }
+
+      function fetchDefillamaPrices(
+        missing: ReadonlyArray<string>,
+      ): Effect.Effect<Record<string, number>, never> {
+        if (missing.length === 0 || config.defillamaEnabled === false) return Effect.succeed({});
+        return Effect.gen(function* () {
+          const coins = yield* Effect.tryPromise(() => fetchDefillamaCoins(missing));
+          const result: Record<string, number> = {};
+          for (const mint of missing) {
+            const price = coins.get(mint)?.priceUsd;
+            if (price !== null && price !== undefined && price > 0) {
+              result[mint] = price;
+              setCachedPrice(mint, price);
+            }
+          }
+          return result;
+        }).pipe(Effect.catch(() => Effect.succeed({})));
+      }
+
+      function fetchDexscreenerPrices(
+        missing: ReadonlyArray<string>,
+      ): Effect.Effect<Record<string, number>, never> {
+        if (missing.length === 0 || config.dexscreenerEnabled === false) return Effect.succeed({});
+        return Effect.gen(function* () {
+          const fetched = yield* Effect.tryPromise(() => getDexscreenerTokenPrices(missing));
+          const result: Record<string, number> = {};
+          for (const mint of missing) {
+            const price = fetched.get(mint);
+            if (price !== undefined && price > 0) {
+              result[mint] = price;
+              setCachedPrice(mint, price);
+            }
+          }
+          return result;
         }).pipe(Effect.catch(() => Effect.succeed({})));
       }
 
@@ -2867,16 +2955,40 @@ export const makeAdapterLive = (
 
           // Keyless-first pricing: the shared Helius key 429s under
           // load, so the HOT path must prefer the keyless providers (Jupiter,
-          // CoinGecko) and only fall to Helius DAS getAsset for mints the keyless
-          // sources miss. Previously Helius was tried FIRST, so every missing
+          // DefiLlama, DexScreener, CoinGecko) and only fall to Helius DAS
+          // getAsset for mints the keyless sources miss. Previously Helius was tried FIRST, so every missing
           // mint burned the key's rate limit and added retry backoff latency
           // before the keyless crawl even ran. Reordering is safe: Jupiter/
           // CoinGecko prices are what the keyless fallback already served.
           sourcesAttempted.push("jupiter");
           const jupiterPrices = yield* fetchJupiterPrices(missing);
-          const coinGeckoMissing = mergeProviderPrices(
+          const defillamaMissing = mergeProviderPrices(
             missing,
             jupiterPrices,
+            prices,
+            provenanceOut,
+            useFallback,
+            sourcesAttempted,
+          );
+          if (defillamaMissing.length === 0) return prices;
+
+          sourcesAttempted.push("defillama");
+          const defillamaPrices = yield* fetchDefillamaPrices(defillamaMissing);
+          const dexscreenerMissing = mergeProviderPrices(
+            defillamaMissing,
+            defillamaPrices,
+            prices,
+            provenanceOut,
+            useFallback,
+            sourcesAttempted,
+          );
+          if (dexscreenerMissing.length === 0) return prices;
+
+          sourcesAttempted.push("dexscreener");
+          const dexscreenerPrices = yield* fetchDexscreenerPrices(dexscreenerMissing);
+          const coinGeckoMissing = mergeProviderPrices(
+            dexscreenerMissing,
+            dexscreenerPrices,
             prices,
             provenanceOut,
             useFallback,

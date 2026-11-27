@@ -300,6 +300,9 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     // DexScreener secondary source must never touch the network in existing
     // program tests; stats-pipeline tests opt in explicitly.
     dexscreenerEnabled: false,
+    // Pinned false (production default true) so adapter tests never touch the
+    // keyless DefiLlama price API unless a test explicitly opts in.
+    defillamaEnabled: false,
     rebalanceGasCostSol: 0.01,
     solPriceUsd: 150,
     gasAwareMinDaysOfFeesPaidAhead: 3,

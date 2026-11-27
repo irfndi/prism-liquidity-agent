@@ -41,22 +41,33 @@ export function maskHeliusUrl(u: string): string {
 /** Keyless public Solana RPC used as the default fallback tier. */
 export const PUBLIC_SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com";
 
-/**
- * Second keyless public RPC so a keyless primary still has somewhere to
- * fail over. api.mainnet.solana.com: 7 failures/24h live vs 7192 for the
- * previous lava.build default (2026-09-07) — lava is saturated, drop it.
- */
-export const KEYLESS_FALLBACK_RPC_URL = "https://api.mainnet.solana.com";
+/** Independent keyless provider; unlike the two Solana Labs hostnames, it has its own quota. */
+export const PUBLICNODE_SOLANA_RPC_URL = "https://solana-rpc.publicnode.com";
+
+/** Pocket Network's documented keyless public portal (fair-use, no account). */
+export const POCKET_SOLANA_RPC_URL = "https://solana.api.pocket.network";
+
+const SOLANA_LABS_PUBLIC_RPC_URLS = new Set([
+  PUBLIC_SOLANA_RPC_URL,
+  "https://api.mainnet.solana.com",
+]);
+
+export function isSolanaLabsPublicRpcUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" && SOLANA_LABS_PUBLIC_RPC_URLS.has(`https://${parsed.hostname}`)
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
- * Resolve the RPC fallback URL. When the operator left `SOLANA_RPC_FALLBACK_URL`
- * empty, default it to keyless public Solana RPC so a (shared) primary key's
- * 429s/5xx actually fail over instead of erroring — and so a keyless primary
- * still has a second keyless endpoint to round-robin against. Pure + testable.
- * - empty configured fallback + primary already the public RPC → keyless fallback (no self-fallback)
- * - empty configured fallback + test mode → "" (tests never touch the network)
- * - empty configured fallback + production + non-public primary → public RPC
- * - non-empty configured fallback → used as-is
+ * Resolve the RPC fallback URL. Empty production config gets independent free
+ * capacity: PublicNode and Pocket Network for a Solana Labs public primary,
+ * otherwise all three free providers. The two Solana Labs hostnames share one
+ * quota and are never used as separate scaling legs.
  */
 export function resolveRpcFallbackUrl(
   configuredFallback: string,
@@ -65,9 +76,42 @@ export function resolveRpcFallbackUrl(
 ): string {
   if (configuredFallback.trim()) return configuredFallback;
   if (isTest) return "";
-  return primaryUrl.trim() === PUBLIC_SOLANA_RPC_URL
-    ? KEYLESS_FALLBACK_RPC_URL
-    : PUBLIC_SOLANA_RPC_URL;
+  const primary = primaryUrl.trim();
+  if (isSolanaLabsPublicRpcUrl(primary)) {
+    return `${PUBLICNODE_SOLANA_RPC_URL},${POCKET_SOLANA_RPC_URL}`;
+  }
+  if (primary === PUBLICNODE_SOLANA_RPC_URL) {
+    return `${PUBLIC_SOLANA_RPC_URL},${POCKET_SOLANA_RPC_URL}`;
+  }
+  if (primary === POCKET_SOLANA_RPC_URL) {
+    return `${PUBLIC_SOLANA_RPC_URL},${PUBLICNODE_SOLANA_RPC_URL}`;
+  }
+  return `${PUBLIC_SOLANA_RPC_URL},${PUBLICNODE_SOLANA_RPC_URL},${POCKET_SOLANA_RPC_URL}`;
+}
+
+/** Parse the primary plus comma-separated fallbacks into distinct provider legs. */
+export function parseRpcPoolUrls(primaryUrl: string, fallbackUrls: string): string[] {
+  const urls: string[] = [];
+  const seenProviders = new Set<string>();
+  const providerKey = (url: string): string => {
+    try {
+      const hostname = new URL(url).hostname;
+      return hostname === "api.mainnet-beta.solana.com" || hostname === "api.mainnet.solana.com"
+        ? "solana-labs-public"
+        : url;
+    } catch {
+      return url;
+    }
+  };
+  for (const raw of [primaryUrl, ...fallbackUrls.split(",")]) {
+    const url = raw.trim();
+    if (!url) continue;
+    const key = providerKey(url);
+    if (seenProviders.has(key)) continue;
+    seenProviders.add(key);
+    urls.push(url);
+  }
+  return urls;
 }
 
 function isHeliusHost(url: string): boolean {
@@ -556,6 +600,8 @@ export interface AppConfig {
    *  = active. Same trust posture as gecko (measured volume/TVL, modeled fees,
    *  no safety signals). */
   readonly dexscreenerEnabled?: boolean;
+  /** Keyless DefiLlama coin-price/metadata fallback. Defaults to true. */
+  readonly defillamaEnabled?: boolean;
 
   // ─── Pyth Hermes price feeds ─────────────────────────────────────────────────
   // Optional so standalone test fixtures that omit new fields keep compiling;
@@ -1269,10 +1315,10 @@ const loadConfig = Effect.gen(function* () {
     resolveRpcFallbackUrl(solanaRpcFallbackUrlRaw, solanaRpcUrl, isTest),
     heliusApiKey,
   ).url;
-  // Rate-limit pacing for Solana RPC. Keyless public endpoints
-  // (api.mainnet-beta.solana.com) throttle at ~4 req/s per method, so the
-  // default is conservative; paid/high-tier endpoints can lower it.
-  const rpcMinIntervalMs = yield* validatedNumber("RPC_MIN_INTERVAL_MS", 0, 150, 10_000);
+  // Rate-limit pacing for Solana RPC. The documented public endpoint allows
+  // ~4 req/s per method, so 250ms leaves headroom. Pacing is per endpoint in
+  // the adapter: adding independent providers multiplies aggregate capacity.
+  const rpcMinIntervalMs = yield* validatedNumber("RPC_MIN_INTERVAL_MS", 0, 250, 10_000);
   // DLMM.create costs 1-2 Solana RPC reads per pool; the lbPair immutable
   // fields do not change, so a longer TTL skips re-creation on repeat cycles.
   const dlmmCacheTtlMs = yield* validatedNumber("DLMM_CACHE_TTL_MS", 60_000, 300_000, 3_600_000);
@@ -1433,6 +1479,9 @@ const loadConfig = Effect.gen(function* () {
   );
 
   const dexscreenerEnabled = yield* Config.Boolean("DEXSCREENER_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const defillamaEnabled = yield* Config.Boolean("DEFILLAMA_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
 
@@ -2678,6 +2727,7 @@ const loadConfig = Effect.gen(function* () {
     goPlusTokenRiskCacheTtlMin,
     geckoTerminalEnabled,
     dexscreenerEnabled,
+    defillamaEnabled,
 
     jevEnabled,
     jevApiKey,

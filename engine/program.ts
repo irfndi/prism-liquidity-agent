@@ -9419,12 +9419,12 @@ export const program = Effect.gen(function* () {
     });
   }
 
-  // Real pool stats, resolved datapi (primary) > geckoterminal (secondary)
-  // > dexscreener (secondary resilience) > the adapter's fabricated
-  // heuristic (last-resort safety net). The chosen source is tagged onto the
-  // pool so the volume/fee gates skip heuristic fiction instead of acting on
-  // it. Data-API-exclusive safety signals are never sourced from gecko or
-  // dexscreener: they stay null and the screener fails open on null.
+  // Real pool stats, resolved datapi (primary) > dexscreener (300 req/min)
+  // > geckoterminal (30 req/min) > the adapter's fabricated heuristic
+  // (last-resort safety net). The chosen source is tagged onto the pool so
+  // the volume/fee gates skip heuristic fiction instead of acting on it.
+  // Data-API-exclusive safety signals are never sourced from DexScreener or
+  // gecko: they stay null and the screener fails open on null.
   // Runner APR tracking: map write stays UNCONDITIONAL (rotation reads every
   // incumbent's APR regardless of runner-enabled); only the SQLite ring is gated.
   function trackRunnerApr(
@@ -9475,24 +9475,26 @@ export const program = Effect.gen(function* () {
       binStepByAddress.set(poolAddress, rawPool.binStep);
       function fetchSecondaryPoolStats(priceFeeRate: number) {
         return Effect.gen(function* () {
-          const geckoStats =
-            datapiStats === null && config.geckoTerminalEnabled !== false
-              ? yield* gecko.getPoolStats(poolAddress, priceFeeRate)
-              : null;
           const dexscreenerStats =
             datapiStats === null &&
-            geckoStats === null &&
             config.dexscreenerEnabled !== false &&
             dexscreenerOption._tag === "Some"
               ? yield* dexscreenerOption.value.getPoolStats(poolAddress, priceFeeRate)
+              : null;
+          const geckoStats =
+            datapiStats === null &&
+            dexscreenerStats === null &&
+            config.geckoTerminalEnabled !== false
+              ? yield* gecko.getPoolStats(poolAddress, priceFeeRate)
               : null;
           return { geckoStats, dexscreenerStats };
         });
       }
 
-      // Gecko remains the preferred secondary source (dexscreener is only tried
-      // when gecko itself is unavailable) so the two keyless reserves never
-      // compete for the same quota.
+      // DexScreener has 10× the keyless quota and a 30s edge cache, so it is
+      // the first secondary. GeckoTerminal is only consumed when DexScreener
+      // misses; the providers have independent quotas and never compete for
+      // the same bucket.
       const { geckoStats, dexscreenerStats } = yield* fetchSecondaryPoolStats(
         0.0025 + rawPool.binStep / 10_000,
       );
@@ -9506,14 +9508,14 @@ export const program = Effect.gen(function* () {
       const pool =
         datapiStats !== null
           ? enrichPoolWithDatapi(rawPool, datapiStats)
-          : geckoStats !== null
-            ? enrichPoolFromGecko(rawPool, geckoStats)
-            : dexscreenerStats !== null
-              ? enrichPoolFromGecko(rawPool, dexscreenerStats)
+          : dexscreenerStats !== null
+            ? enrichPoolFromGecko(rawPool, dexscreenerStats)
+            : geckoStats !== null
+              ? enrichPoolFromGecko(rawPool, geckoStats)
               : rawPool;
       // A market-scan pool whose MEASURED (datapi) fee APR clears the runner
       // floor enters with the LAUNCH posture instead of the flat normal
-      // posture. Modeled gecko / heuristic fees never classify a runner.
+      // posture. Modeled secondary-source / heuristic fees never classify a runner.
       const poolFeeAprPct = pool.tvlUsd > 0 ? (pool.fees24hUsd * 365 * 100) / pool.tvlUsd : 0;
       const { runnerConsecutiveCount, runnerAprOutlier } = yield* trackRunnerApr(
         poolAddress,
