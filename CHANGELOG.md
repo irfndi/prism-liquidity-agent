@@ -2,6 +2,22 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.52] — 2026-11-28
+
+### Changed
+
+- **`@solana/web3.js` 1.98.4 → 1.99.0.** Still inside `@meteora-ag/dlmm`'s `^1.91.6` range, checked by `check:toolchain`, with the full suite green. web3.js **3.x** stays pinned out: it rewrote the connection/transaction API the adapter is built on, so it is a refactor with its own plan — `dependabot.yml` now ignores the major so it cannot arrive as a surprise PR.
+- **`@effect/tsgo` 0.73.4 → 0.74.1, `oxlint` + `@oxlint/plugins` 1.94.0 → 1.95.0, `oxlint-tsgolint` 7.0.2008 → 7.0.2009**, with both anti-slop bundles rebuilt against the new plugin API. These ship as a matched set: tsgo publishes the Oxlint support table, and the anti-slop bundles inline `@oxlint/plugins` at build time, so a stale bundle would keep loading a mismatched shim silently.
+
+### Fixed
+
+- **Three `typescript/no-meaningless-void-operator` findings** the new oxlint surfaced — `cli/pnl-audit.ts` (an unused `rows` parameter is gone), `bench/snapshot-replay.test.ts` (an unused `computeMetrics` binding), and `bench/adapter-position-value.test.ts` (an unused mock parameter).
+
+### Changed (Dependabot)
+
+- **The root and `cloudflare/` are declared as `bun` projects.** They were declared `npm_and_yarn` while holding `bun.lock`, which made **every** Dependabot update run fail with `misconfigured_tooling` — that, not conflicting content, is why the 2026-08-31 batch (#225-#229) sat unmergeable for three months.
+- **Coupled dependencies are grouped** (`effect-toolchain`, `solana-sdk`, `dev-tooling`) so a PR moves a whole cluster that can actually go green, and the three packages `@meteora-ag/dlmm` pins exactly (`@coral-xyz/anchor`, `@coral-xyz/borsh`) plus `@solana/web3.js` majors are ignored.
+
 ## [0.2.51] — 2026-11-28
 
 ### Fixed
