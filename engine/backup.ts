@@ -112,8 +112,13 @@ export interface RestoreReport {
   readonly problems: readonly string[];
 }
 
-/** `vec_memory` is created on demand and `_migrations` is bookkeeping. */
-const INTERNAL_TABLE_PREFIXES = ["sqlite_", "_migrations"];
+/**
+ * `_migrations` is bookkeeping, `sqlite_*` is SQLite's own, and `vec_memory_*`
+ * are vec0's internal shadow tables: they are an implementation detail of the
+ * extension, not a contract, so counting them would put noise in the manifest
+ * and couple it to sqlite-vec's internals.
+ */
+const INTERNAL_TABLE_PREFIXES = ["sqlite_", "_migrations", "vec_memory_"];
 
 /** A count that could not be measured (vec0 unavailable) is recorded as -1. */
 export const COUNT_UNKNOWN = -1;

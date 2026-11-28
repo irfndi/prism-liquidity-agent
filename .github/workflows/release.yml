@@ -292,7 +292,13 @@ jobs:
               # prismd native host (linux-x64 only): version + checksum alongside bundles.
               if [ -f "$dir/prismd-linux-x64" ]; then
                 cp "$dir/prismd-linux-x64" "release-assets/prismd-${VERSION}-linux-x64"
-                cp "$dir/prismd-linux-x64.sha256" "release-assets/prismd-${VERSION}-linux-x64.sha256" 2>/dev/null || true
+                # The checksum must name the file that actually ships. The CI
+                # artifact's checksum says `./prismd-linux-x64`, which does not
+                # exist next to the renamed asset, so `sha256sum -c` failed for
+                # every consumer of the release — regenerate it here instead of
+                # copying.
+                (cd release-assets && sha256sum "prismd-${VERSION}-linux-x64" \
+                  > "prismd-${VERSION}-linux-x64.sha256")
               fi
             fi
           done
