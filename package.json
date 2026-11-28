@@ -60,7 +60,7 @@
   },
   "devDependencies": {
     "@effect/tsgo": "0.73.4",
-    "@oxlint/plugins": "1.94.0",
+    "@oxlint/plugins": "1.95.0",
     "@types/node": "^26.6.11",
     "@types/semver": "^7.8.0",
     "@vitest/coverage-istanbul": "^5.1.2",
@@ -68,7 +68,7 @@
     "bun-types": "1.4.5",
     "fast-check": "^4.11.0",
     "oxfmt": "^0.80.0",
-    "oxlint": "1.94.0",
+    "oxlint": "1.95.0",
     "oxlint-tsgolint": "7.0.2008",
     "tsdown": "^0.23.7",
     "typescript": "7.0.2",
