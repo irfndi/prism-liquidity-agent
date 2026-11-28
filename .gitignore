@@ -43,6 +43,7 @@ site/
 
 # Test artifacts
 bench/tmp-audit/
+bench/tmp-backup-drill.json
 
 # Bundle build artifacts
 prism-v*.tar.gz

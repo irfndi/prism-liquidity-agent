@@ -10,10 +10,17 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 TLA_DIR="$ROOT/native/tla"
 TLA_JAR="$TLA_DIR/tla2tools.jar"
-TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar"
+TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
 # Pinned digest: TLC runs as you, so a substituted jar is arbitrary code.
 # Re-pin deliberately when bumping the version.
-TLA_SHA256="67f9575c3b9ef7a0787b1bded34812862ffe79d711298e5a75b1a77720b19928"
+#
+# Pinned to v1.7.4, not v1.8.0: GitHub release ASSETS ARE MUTABLE, and the
+# v1.8.0 jar was rebuilt in place on 2026-11-28 (its digest changed from the
+# value pinned on 2026-11-26 to df7cef5d…), which broke this gate for every
+# checkout at once — "digest mismatch" on a URL that had not changed. A release
+# whose artifact can be republished is not a pin. v1.7.4 has been stable since
+# 2024-08-05.
+TLA_SHA256="936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 TLC=(java -XX:+UseParallelGC -cp "$TLA_JAR" tlc2.TLC -workers auto)
 
 # Private scratch dir: predictable /tmp paths let a local user plant a symlink
