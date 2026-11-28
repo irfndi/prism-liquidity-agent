@@ -25,7 +25,7 @@
     "@cloudflare/vitest-pool-workers": "^0.18.8",
     "@cloudflare/workers-types": "^5.20261125.1",
     "@vitest/runner": "^4.1.10",
-    "@vitest/snapshot": "^4.1.10",
+    "@vitest/snapshot": "^5.1.1",
     "esbuild": "0.28.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
