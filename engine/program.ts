@@ -274,6 +274,7 @@ import {
 } from "./runner-preset.js";
 import {
   estimateEntrySolLamports,
+  fitEntrySizeToSolBudget,
   freeEntrySolLamports,
   hasNativeSolLeg,
 } from "./entry-sol-budget.js";
@@ -522,6 +523,94 @@ export interface JevStressHalveResult {
   readonly halved: boolean;
   readonly floored: boolean;
   readonly positionSizeUsd: number;
+}
+
+/**
+ * Shrink an approved ENTER to the free SOL budget. Returns null when the
+ * desired size already fits (keep the plan) or even the floor cannot be funded
+ * (skip).
+ *
+ * Capacity is the usual reason a qualifying entry is dropped: a wallet a few
+ * percent short skips a pool it could have traded. Shrinking is safe because
+ * smaller sizes only relax the downstream allocation/risk caps, and the exact
+ * estimate is re-checked against the fitted size.
+ */
+export function resizeEnterToFreeSol(input: {
+  readonly desiredSizeUsd: number;
+  readonly freeSolLamports: bigint;
+  readonly solPriceUsd: number;
+  readonly poolHasSolLeg: boolean;
+}): { readonly sizeUsd: number; readonly lamports: bigint } | null {
+  const sizeUsd = fitEntrySizeToSolBudget({
+    ...input,
+    solFunded: true,
+    minSizeUsd: ENTRY_SIZE_FLOOR_USD,
+  });
+  if (sizeUsd === null || sizeUsd >= input.desiredSizeUsd) return null;
+  return {
+    sizeUsd,
+    lamports: estimateEntrySolLamports({
+      positionSizeUsd: sizeUsd,
+      solPriceUsd: input.solPriceUsd,
+      poolHasSolLeg: input.poolHasSolLeg,
+      solFunded: true,
+    }),
+  };
+}
+
+/** Outcome of applying the batch SOL reserve to one redeploy candidate. */
+export type RedeploySolGate =
+  | { readonly kind: "fits"; readonly lamports: bigint }
+  | { readonly kind: "resized"; readonly sizeUsd: number; readonly lamports: bigint }
+  | { readonly kind: "skip"; readonly reason: string };
+
+/**
+ * Decide how a redeploy candidate meets the free-SOL budget.
+ *
+ * `resized` keeps the widened-size contract intact: a fitted size at or below
+ * the normal entry is NOT a redeploy, so it reports `skip` (same as the
+ * insufficient-budget case) rather than entering smaller than the normal lane.
+ */
+export function planRedeploySolGate(input: {
+  readonly requestedSizeUsd: number;
+  readonly normalEntrySizeUsd: number;
+  readonly budgetKnown: boolean;
+  readonly freeSolLamports: bigint;
+  readonly solPriceUsd: number;
+  readonly poolHasSolLeg: boolean;
+}): RedeploySolGate {
+  const needed = (sizeUsd: number): bigint =>
+    estimateEntrySolLamports({
+      positionSizeUsd: sizeUsd,
+      solPriceUsd: input.solPriceUsd,
+      poolHasSolLeg: input.poolHasSolLeg,
+      solFunded: true,
+    });
+  const neededLamports = needed(input.requestedSizeUsd);
+  if (input.budgetKnown && neededLamports <= input.freeSolLamports) {
+    return { kind: "fits", lamports: neededLamports };
+  }
+  const budgetHuman = input.budgetKnown
+    ? (Number(input.freeSolLamports) / 1e9).toFixed(4)
+    : "unknown";
+  const resized = input.budgetKnown
+    ? resizeEnterToFreeSol({
+        desiredSizeUsd: input.requestedSizeUsd,
+        freeSolLamports: input.freeSolLamports,
+        solPriceUsd: input.solPriceUsd,
+        poolHasSolLeg: input.poolHasSolLeg,
+      })
+    : null;
+  if (resized !== null && resized.sizeUsd > input.normalEntrySizeUsd) {
+    return { kind: "resized", sizeUsd: resized.sizeUsd, lamports: resized.lamports };
+  }
+  return {
+    kind: "skip",
+    reason:
+      resized !== null
+        ? `[idle-redeploy] skipped — fitted size $${resized.sizeUsd.toFixed(2)} does not exceed normal entry $${input.normalEntrySizeUsd.toFixed(2)} (wallet-reserve gate, capacity-limited)`
+        : `[idle-redeploy] skipped — free SOL ${budgetHuman} < needed ${(Number(neededLamports) / 1e9).toFixed(4)} (wallet-reserve gate, capacity-limited)`,
+  };
 }
 
 /** Halve the full size on stress, floored at ENTRY_SIZE_FLOOR_USD. Pure. */
@@ -8018,40 +8107,41 @@ export const program = Effect.gen(function* () {
               return { verdict: "done", executed: false, executionError: undefined };
             }
             // Issue #170: the same batch wallet-reserve gate as the in-slot ENTER
-            // path — skip capacity-limited; the next cycle re-evaluates.
-            if (solFundedEntryMode) {
-              const redeploySizeUsd = decision.positionSizeUsd;
-              if (redeploySizeUsd !== undefined) {
-                const neededLamports = estimateEntrySolLamports({
-                  positionSizeUsd: redeploySizeUsd,
-                  solPriceUsd: entrySolPriceUsd,
-                  poolHasSolLeg: hasNativeSolLeg(candidate.pool),
-                  solFunded: true,
-                });
-                if (!entrySolBudgetKnown || neededLamports > entrySolBudgetLamports) {
-                  const budgetHuman = entrySolBudgetKnown
+            // path — shrink to the free SOL when the widened size does not fit,
+            // else skip capacity-limited; the next cycle re-evaluates.
+            if (solFundedEntryMode && decision.positionSizeUsd !== undefined) {
+              const gate = planRedeploySolGate({
+                requestedSizeUsd: decision.positionSizeUsd,
+                normalEntrySizeUsd: candidate.normalEntrySizeUsd,
+                budgetKnown: entrySolBudgetKnown,
+                freeSolLamports: entrySolBudgetLamports,
+                solPriceUsd: entrySolPriceUsd,
+                poolHasSolLeg: hasNativeSolLeg(candidate.pool),
+              });
+              if (gate.kind === "skip") {
+                idleRedeployLogger.info("Idle redeploy blocked by the wallet SOL reserve", {
+                  pool: candidate.poolAddress,
+                  freeSol: entrySolBudgetKnown
                     ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
-                    : "unknown";
-                  const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
-                  idleRedeployLogger.info(
-                    "Idle redeploy skipped — free SOL below entry estimate (wallet reserve)",
-                    {
-                      pool: candidate.poolAddress,
-                      freeSol: budgetHuman,
-                      neededSol: neededHuman,
-                    },
-                  );
-                  yield* recordRedeploySkip(
-                    candidate,
-                    ctx.cycleId,
-                    `[idle-redeploy] skipped — free SOL ${budgetHuman} < needed ${neededHuman} (wallet-reserve gate, capacity-limited)`,
-                    "[idle-redeploy] wallet SOL reserve insufficient",
-                  );
-                  yield* finalizeAppliedProposal(agentState, undefined, false, decision.action);
-                  return { verdict: "next", executed: false, executionError: undefined };
-                }
-                entrySolBudgetLamports -= neededLamports;
+                    : "unknown",
+                });
+                yield* recordRedeploySkip(
+                  candidate,
+                  ctx.cycleId,
+                  gate.reason,
+                  "[idle-redeploy] wallet SOL reserve insufficient",
+                );
+                yield* finalizeAppliedProposal(agentState, undefined, false, decision.action);
+                return { verdict: "next", executed: false, executionError: undefined };
               }
+              if (gate.kind === "resized") {
+                idleRedeployLogger.info("Idle redeploy resized to fit free SOL (wallet reserve)", {
+                  pool: candidate.poolAddress,
+                  resizedSizeUsd: gate.sizeUsd,
+                });
+                decision.positionSizeUsd = gate.sizeUsd;
+              }
+              entrySolBudgetLamports -= gate.lamports;
             }
             const entryPrep = yield* EntryPrepService;
             const liveResult = yield* executeLive(
@@ -8415,7 +8505,6 @@ export const program = Effect.gen(function* () {
         return;
       }
       const gateResult = gateAndRankLaunchPools(discovered, launchGateConfig(config, now));
-      gateAndRankLaunchPools(discovered, launchGateConfig(config, now));
       // The radar's observable answer to "why nothing admitted": top
       // rejection reasons with counts. A 100%-rejection universe is
       // diagnosable (age cap vs TVL cap vs token-safety floor) instead of a
@@ -14923,6 +15012,29 @@ export const program = Effect.gen(function* () {
               const budgetHuman = entrySolBudgetKnown
                 ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
                 : "unknown";
+              // Capacity-limited, not a failure: shrink the entry to the free
+              // SOL instead of skipping a qualifying pool (never below the $10
+              // floor). Downstream risk/allocation caps re-run on the smaller
+              // size, and the exact estimate is re-checked inside the fit.
+              const resized = entrySolBudgetKnown
+                ? resizeEnterToFreeSol({
+                    desiredSizeUsd: entrySizeUsd,
+                    freeSolLamports: entrySolBudgetLamports,
+                    solPriceUsd: entrySolPriceUsd,
+                    poolHasSolLeg: hasNativeSolLeg(pool),
+                  })
+                : null;
+              if (resized !== null) {
+                decision.positionSizeUsd = resized.sizeUsd;
+                entrySolBudgetLamports -= resized.lamports;
+                logger.info("[wallet-reserve] entry resized to fit free SOL", {
+                  pool: poolAddress,
+                  desiredSizeUsd: entrySizeUsd,
+                  resizedSizeUsd: resized.sizeUsd,
+                  freeSol: budgetHuman,
+                });
+                return null;
+              }
               const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
               const reason = `[wallet-reserve] free SOL ${budgetHuman} < needed ${neededHuman} — entry skipped (capacity-limited, not an error)`;
               yield* audit
