@@ -25,6 +25,8 @@ import { configCommand } from "./config.js";
 import { registerPnlAuditCommand } from "./pnl-audit.js";
 import { registerScanDiagCommand } from "./scan-diag.js";
 import { forensicsCommand } from "./forensics.js";
+import { backupCommand, restoreCommand } from "./backup.js";
+import { copyFeedCommand } from "./copy-feed.js";
 import { getCurrentVersion } from "../engine/version.js";
 
 const program = new Command();
@@ -60,5 +62,8 @@ program.addCommand(configCommand);
 registerPnlAuditCommand(program);
 registerScanDiagCommand(program);
 program.addCommand(forensicsCommand);
+program.addCommand(backupCommand);
+program.addCommand(restoreCommand);
+program.addCommand(copyFeedCommand);
 
 await program.parseAsync();

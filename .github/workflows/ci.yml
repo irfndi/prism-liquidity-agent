@@ -733,7 +733,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: native/tla/tla2tools.jar
-          key: ${{ runner.os }}-tla2tools-1.8.0
+          key: ${{ runner.os }}-tla2tools-1.7.4
 
       - name: Run TLA+ models
         run: bash scripts/tla-verify.sh

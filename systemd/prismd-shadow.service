@@ -1,0 +1,48 @@
+# Small-host systemd preset: the Rust shadow (prismd)
+
+The shadow mirrors the TS verify profile's decisions without executing, so it is
+the first thing to cap when RAM is tight: it costs ~10 MB and informs, it does
+not trade.
+
+Install:
+
+```sh
+sudo cp systemd/prismd-shadow.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now prismd-shadow.service
+journalctl -u prismd-shadow.service -f
+```
+
+The profile path is positional (`ExecStart=.../prismd /root/.prismd/shadow.env`);
+see `docs/plan/box-prismd-deploy.md` §7 for the env-mirror recipe that makes the
+shadow read the SAME book as the profile it shadows.
+
+[Unit]
+Description=Prism shadow (prismd) — read-only decision mirror
+After=network-online.target prism-profile@prism-paper-bin20.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/root/.prismd/bin/prismd /root/.prismd/shadow.env
+WorkingDirectory=/root/.prismd
+Restart=on-failure
+RestartSec=60
+MemoryMax=128M
+MemoryHigh=96M
+OOMPolicy=stop
+CPUQuota=25%
+LimitNOFILE=512
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# The shadow must be able to READ the live book and write only its own state.
+ReadOnlyPaths=/root/.local/share/prism
+ReadWritePaths=/root/.prismd
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=prismd-shadow
+
+[Install]
+WantedBy=multi-user.target

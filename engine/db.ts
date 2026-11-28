@@ -170,6 +170,16 @@ function tryLoadVecExtension(db: Database): boolean {
   }
 }
 
+/**
+ * Load sqlite-vec into an already-open database. Exported for read-only tools
+ * (backup inspection) that must COUNT a `vec_memory` table: the table is a
+ * virtual table, so opening the file without the extension makes every query
+ * against it fail with "no such module: vec0".
+ */
+export function attachVecExtension(db: Database): boolean {
+  return tryLoadVecExtension(db);
+}
+
 function verifyVecMemoryTable(db: Database, vecLoaded: boolean): void {
   if (!vecLoaded) return;
   if (hasVecMemoryTable(db)) return;

@@ -1,0 +1,66 @@
+# Small-host systemd preset (issue #250)
+#
+# Target: 2 vCPU / 1.9 GiB RAM shared with OpenBot and OpenCode. Prism is the
+# priority workload, but it must never be the reason the host OOMs.
+#
+# Why these numbers, not "whatever systemd defaults to":
+# - Measured RSS, one Bun profile at a settled 60 s cadence: 107-125 MB
+#   (docs/plan/box-prismd-deploy.md §7). MemoryMax=384M leaves ~3x headroom for
+#   a cycle peak (bin-array decode, snapshot capture) and still fails the unit
+#   rather than the host if something leaks.
+# - prismd (Rust shadow) measures ~10 MB. MemoryMax=128M is generous.
+# - CPUQuota caps each profile so TWO profiles cannot starve OpenCode. 40% each
+#   = 80% of one core at worst; the 60 s cadence leaves the rest idle.
+# - LimitNOFILE: each profile opens the SQLite DB + WAL + SHM, a handful of
+#   outbound sockets, and the logs. 1024 is 10x what was observed.
+# - Restart=always with a 30 s backoff and StartLimitBurst=5/30min: a crash
+#   loops a few times then STOPS being restarted, so a persistent failure is
+#   visible instead of burning the host.
+#
+# Install (one profile at a time, never both at once):
+#   sudo cp systemd/prism-profile@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now prism-profile@prism-paper-bin20.service
+#   journalctl -u prism-profile@prism-paper-bin20.service -f
+
+[Unit]
+Description=Prism profile %i
+After=network-online.target
+Wants=network-online.target
+# A profile that dies 5 times in 30 minutes is broken, not unlucky.
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# %i is the profile name, e.g. prism-paper-bin20 → ~/.config/prism-paper-bin20/.env
+EnvironmentFile=/root/.config/%i/.env
+# `prism dev` sets the direct-execution flag and owns the scan loop; running the
+# engine entrypoint directly would be refused by engine/index.ts's guard.
+ExecStart=/usr/local/bin/prism dev
+WorkingDirectory=/opt/prism
+
+Restart=always
+RestartSec=30
+# Hard caps. MemoryMax (not MemoryHigh) because a slow memory leak must fail the
+# unit, and OOMPolicy=stop keeps systemd from silently restarting it in a loop.
+MemoryMax=384M
+MemoryHigh=320M
+OOMPolicy=stop
+CPUQuota=40%
+LimitNOFILE=1024
+TasksMax=256
+
+# Smaller-host hygiene: no new privileges, private /tmp, and a writable state
+# dir only where Prism actually writes.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/root/.local/share/prism /root/.config/%i /opt/prism/logs
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=%i
+
+[Install]
+WantedBy=multi-user.target
