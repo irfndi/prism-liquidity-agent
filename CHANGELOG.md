@@ -2,6 +2,17 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.51] — 2026-11-28
+
+### Fixed
+
+- **`prismd-<version>-linux-x64.sha256` could not verify the shipped binary.** `release.yml` copied the checksum generated in the build job, which names `./prismd-linux-x64` — a path that does not exist beside the renamed release asset — so `sha256sum -c` failed for every consumer of v0.2.50. The checksum is now regenerated against the filename that actually ships.
+- **Backup manifest listed vec0's internal shadow tables.** `vec_memory_chunks`, `vec_memory_rowids`, `vec_memory_info`, `vec_memory_auxiliary` and `vec_memory_vector_chunks00` are sqlite-vec implementation detail, not a contract; they are no longer part of the row-count baseline, so a restore check does not depend on the extension's private schema.
+
+### Verification
+
+Drill against the published v0.2.50 bundle: download + checksum, extract, run `prism backup` on a real schema-26 database, `prism restore --verify-only`, restore into a fresh directory, then confirm `PRAGMA integrity_check = ok`, schema version 26, and the vector row present in the restored file.
+
 ## [0.2.50] — 2026-11-28
 
 ### Added
