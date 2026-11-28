@@ -120,6 +120,73 @@ prism link-telegram
 # Send this code to @prism_agent_bot
 ```
 
+## Operations Commands
+
+### `prism backup`
+
+Archive the live SQLite databases with a verifiable manifest. Uses `VACUUM INTO`,
+so it is safe against a running engine and never loads the database into memory.
+
+```bash
+prism backup                                   # active DB + every ~/.config/prism-* profile
+prism backup --db /path/to/prism.db            # one explicit database
+prism backup --profile ~/.config/prism-paper-bin20
+prism backup --out /root/prism-archive-20261128
+```
+
+The archive holds `manifest.json` (source paths, byte sizes, SHA-256, schema
+versions, per-table row counts, `PRAGMA quick_check`) and `SHA256SUMS`.
+
+### `prism restore <archive>`
+
+Verify and restore an archive.
+
+```bash
+prism restore ./prism-archive-20261128 --verify-only   # pre-cutover drill, writes nothing
+prism restore ./prism-archive-20261128 --force         # restore to the recorded paths
+prism restore ./prism-archive-20261128 --target-dir /new/root
+```
+
+Restore refuses a file whose hash, size, integrity or row counts do not match the
+manifest. Existing databases are moved aside, not deleted. See
+[`migration-2gb-host.md`](migration-2gb-host.md).
+
+### `prism forensics`
+
+Read-only per-rule and per-pool PnL attribution from the local ledger. Only
+executed ENTERs are attributed, and the audit window is widened by the ENTER
+lookback so a position closed just inside the window keeps the entry that
+created it.
+
+```bash
+prism forensics                     # trailing 30 days
+prism forensics --all --top 30
+prism forensics --json
+```
+
+### `prism audit-pnl`
+
+Re-derive every closed position's realized PnL from its stored legs and flag
+drift or rent-unaccounted rows. Exits 1 on drift.
+
+```bash
+prism audit-pnl
+prism audit-pnl --apply-rent-backfill   # void phantom rows to NULL, never to 0
+```
+
+### `prism copy-feed`
+
+Serve the copy-trading signal feed consumed by `COPY_SIGNALS_ENDPOINT`.
+
+```bash
+export COPY_SIGNALS_TOKEN=<long random>
+prism copy-feed --port 8787 --host 127.0.0.1
+curl -H "Authorization: Bearer $COPY_SIGNALS_TOKEN" http://127.0.0.1:8787/health
+```
+
+`/health` reports feed health, not process liveness: `ok: false` with
+`reason: "feed is empty …"` means the process is fine and nobody is publishing.
+
 ## Development Commands
 
 These are used when developing Prism itself:

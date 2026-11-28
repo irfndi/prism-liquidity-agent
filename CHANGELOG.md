@@ -2,6 +2,28 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.50] — 2026-11-28
+
+### Added
+
+- **`prism backup` / `prism restore` (#250).** `VACUUM INTO` per live database — a consistent copy inside one read transaction that never stops the writer and never loads a multi-GB file into RAM — plus a manifest carrying source path, profile dir, byte size, SHA-256, schema version, per-table row counts, `PRAGMA quick_check` and the SQLite version. Restore re-verifies size, hash, `integrity_check` and the row-count baseline, stages the file, re-checks it, then renames atomically; an existing database is moved aside with its `-wal`/`-shm` pair, never deleted. `--verify-only` is the pre-cutover drill and writes nothing. Profile databases are discovered from `~/.config/prism-*/.env`, but the manifest records the resolved path so it can be checked against `/proc/<pid>/fd`.
+- **`prism copy-feed` (#250).** The producer for the copy-trading feed, shipped in the release after the old `prism-copy-signals` service was found running from a deleted directory. Constant-time bearer auth, refuses to start without `COPY_SIGNALS_TOKEN`, validates observations against a schema at the HTTP boundary, and reports **feed** health (`empty` / `stale` / `ok`) instead of a meaningless 200.
+- **Small-host systemd units (#250).** `systemd/prism-profile@.service` caps each profile (`MemoryMax=384M`, `MemoryHigh=320M`, `CPUQuota=40%`, `LimitNOFILE=1024`, `TasksMax=256`, `OOMPolicy=stop`, crash-loop limit) and `systemd/prismd-shadow.service` caps the Rust shadow at 128M / 25%. Sized from measured RSS (107-125 MB per Bun profile, ~10 MB for the shadow).
+- **`prism forensics` and `prism audit-pnl` tooling.** Per-rule / per-pool PnL attribution over the recorded decisions and the closed-position ledger, plus an empty-reap ledger repair (`scripts/reconcile-ledger.ts`). Only executed ENTERs are attributed; a partially confirmed settlement group stays unresolved rather than booking a fraction as full proceeds.
+- **Entry size fits the free SOL.** `fitEntrySizeToSolBudget` shrinks an approved entry to the balance instead of skipping a qualifying pool (never below the $10 floor), in both the in-slot ENTER and the idle redeploy. The redeploy keeps its widened-size contract.
+- [`docs/migration-2gb-host.md`](docs/migration-2gb-host.md) — the archive → verify → restore → cap → rollback runbook.
+
+### Fixed
+
+- **The TLA+ gate was broken by a republished release asset.** `scripts/tla-verify.sh` pinned the v1.8.0 `tla2tools.jar` digest, but GitHub release assets are mutable and that jar was rebuilt in place on 2026-11-28 — every checkout started failing `digest mismatch` on an unchanged URL. Pinned to v1.7.4 (stable since 2024-08-05) with the CI cache key updated.
+- **`mcp-server` advertised `node >= 18`** while `better-sqlite3` requires 22; the manifest now says `>= 22`.
+- **Duplicate `gateAndRankLaunchPools` call** in the launch-radar refresh recomputed the gate and discarded the result.
+
+### Verification
+
+- **2,455 tests pass** (171 files), including new E2E: `bench/backup-restore.test.ts` (three real profile databases, backed up with a writer attached, verified, restored onto a simulated fresh host, integrity/schema/count/vector assertions, tampered artifact rejected, WAL pair displaced correctly, repeatable artifact emitted) and `bench/copy-signal-feed.test.ts` (production routing over a socket, fed into the engine's own parser).
+- `check:toolchain`, `tsc --noEmit`, `oxlint`, `oxfmt --check`, `bend PROOF.bend`, and TLC on all fixed models plus all four buggy models (which must fail).
+
 ## [0.2.49] — 2026-11-26
 
 ### Added
