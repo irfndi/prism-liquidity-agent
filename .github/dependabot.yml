@@ -1,6 +1,10 @@
 version: 2
 updates:
-  - package-ecosystem: npm
+  # The root is a Bun project (bun.lock). Declaring it as `npm_and_yarn` made
+  # EVERY update run fail with `misconfigured_tooling: … Dependabot's
+  # npm_and_yarn ecosystem cannot update bun.lock` — which is why the 2026-08-31
+  # batch (#225-#229) was never rebased and sat unmergeable for three months.
+  - package-ecosystem: "bun"
     directory: "/"
     schedule:
       interval: weekly
@@ -8,13 +12,12 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
-    # Three dependency clusters in this repo break each other silently when one
-    # side moves alone, and `bun run check:toolchain` (verify step 0, before
-    # lint) fails the build when they drift. Dependabot cannot express that
-    # coupling, so single-package PRs for these always land red — which is
-    # exactly what happened to #225-#229 (opened 2026-08-31, closed unmergeable
-    # on 2026-11-28). Grouping gives one PR per cluster that can actually go
-    # green; `ignore` covers the members that must not move at all.
+    # Three dependency clusters break each other silently when one side moves
+    # alone, and `bun run check:toolchain` (verify step 0, before lint) fails the
+    # build when they drift. Dependabot cannot express that coupling, so a
+    # single-package bump for these always lands red. Grouping gives one PR per
+    # cluster that can actually go green; `ignore` covers the members that must
+    # not move at all.
     groups:
       effect-toolchain:
         # @effect/tsgo publishes a support table for Oxlint/tsgolint/TypeScript,
@@ -50,6 +53,20 @@ updates:
       - dependency-name: "@solana/web3.js"
         update-types:
           - "version-update:semver-major"
+
+  # Cloudflare subproject: separate bun.lock, separate manifest.
+  - package-ecosystem: "bun"
+    directory: "/cloudflare"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+
+  # `mcp-server` is the one npm subproject, but its lockfile is gitignored, so
+  # Dependabot has nothing to update there. It is upgraded by hand with the
+  # rest of the toolchain.
 
   - package-ecosystem: github-actions
     directory: "/"
