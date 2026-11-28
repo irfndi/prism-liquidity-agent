@@ -336,7 +336,7 @@ function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig):
   for (let i = 0; i < snaps.length; i++) {
     const s = snaps[i]!;
     const pool = snapshotPoolState(s);
-    const metrics = DLMMStrategy.computeMetrics(pool, s.binArray, previousTvl);
+    DLMMStrategy.computeMetrics(pool, s.binArray, previousTvl);
     const inRange = s.activeBinId >= lower && s.activeBinId <= upper;
     const feesThisTick = feesForTick(s.fees24hUsd, inRange);
     totalFees += feesThisTick;
@@ -373,7 +373,6 @@ function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig):
       }
     }
     previousTvl = s.tvlUsd;
-    void metrics;
   }
 
   return buildBacktestResult(
