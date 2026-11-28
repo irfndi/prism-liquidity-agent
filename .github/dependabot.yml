@@ -8,6 +8,49 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
+    # Three dependency clusters in this repo break each other silently when one
+    # side moves alone, and `bun run check:toolchain` (verify step 0, before
+    # lint) fails the build when they drift. Dependabot cannot express that
+    # coupling, so single-package PRs for these always land red — which is
+    # exactly what happened to #225-#229 (opened 2026-08-31, closed unmergeable
+    # on 2026-11-28). Grouping gives one PR per cluster that can actually go
+    # green; `ignore` covers the members that must not move at all.
+    groups:
+      effect-toolchain:
+        # @effect/tsgo publishes a support table for Oxlint/tsgolint/TypeScript,
+        # and the anti-slop Oxlint plugins inline @oxlint/plugins at bundle
+        # time, so a stale bundle silently loads a mismatched shim.
+        patterns:
+          - "effect"
+          - "@effect/tsgo"
+          - "oxlint"
+          - "oxlint-tsgolint"
+          - "oxfmt"
+          - "@oxlint/plugins"
+          - "typescript"
+      solana-sdk:
+        patterns:
+          - "@solana/spl-token"
+          - "@meteora-ag/dlmm"
+      dev-tooling:
+        patterns:
+          - "tsdown"
+          - "@types/*"
+          - "vitest"
+          - "@vitest/*"
+          - "fast-check"
+    ignore:
+      # @meteora-ag/dlmm 1.9.14 declares these as EXACT deps (anchor 0.31.0,
+      # web3.js ^1.91.6). A "latest" bump compiles the adapter against a
+      # different SDK than the one it calls — a silent ABI/IDL mismatch at
+      # transaction-build time, not a type error. Re-evaluate only when dlmm
+      # moves its own peer; check:toolchain reports the moment it does.
+      - dependency-name: "@coral-xyz/anchor"
+      - dependency-name: "@coral-xyz/borsh"
+      - dependency-name: "@solana/web3.js"
+        update-types:
+          - "version-update:semver-major"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
