@@ -194,8 +194,7 @@ function mockRpcSendPipeline(): void {
     lastValidBlockHeight: 1_000_000,
   });
   let n = 0;
-  vi.spyOn(Connection.prototype, "sendRawTransaction").mockImplementation((raw) => {
-    void raw;
+  vi.spyOn(Connection.prototype, "sendRawTransaction").mockImplementation(() => {
     n += 1;
     return Promise.resolve(`mock-sig-${n}`);
   });

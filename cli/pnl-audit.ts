@@ -39,11 +39,7 @@ function money(value: number): string {
   return `${sign}$${Math.abs(value).toFixed(2)}`;
 }
 
-function printReport(
-  audit: PnlAudit,
-  rows: readonly { positionId: string }[],
-  applied: number,
-): void {
+function printReport(audit: PnlAudit, applied: number): void {
   const line = (label: string, value: string) => console.log(`${label.padEnd(22)} ${value}`);
   line("closed positions", String(audit.closedCount));
   line("identity ok", String(audit.counts.ok));
@@ -71,7 +67,6 @@ function printReport(
       `\nFAIL: ${audit.counts.drift} position(s) do not satisfy realized = withdrawn + fees + rewards - deposit - costs`,
     );
   }
-  void rows;
 }
 
 export function registerPnlAuditCommand(program: Command): void {
@@ -101,7 +96,7 @@ export function registerPnlAuditCommand(program: Command): void {
         if (args.json) {
           console.log(JSON.stringify({ ...audit, applied }, null, 2));
         } else {
-          printReport(audit, rows, applied);
+          printReport(audit, applied);
         }
         process.exit(audit.counts.drift > 0 ? 1 : 0);
       } finally {
